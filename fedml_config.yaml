@@ -35,7 +35,7 @@ comm_args:
 
 tracking_args:
   enable_wandb: true
-  wandb_key: a9aa42daca772f9ae106416d876d934de6726556
+  wandb_key: 
   wandb_entity: s-urso2
   wandb_project: simulation
   run_name: fedml_torch_fedavg_cifar10_resnet18
