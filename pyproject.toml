@@ -1,0 +1,25 @@
+[project]
+name = "tesifedml"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "fedml[mpi]==0.9.5",
+    "gevent==21.12.0",
+    "setuptools>=75.3.2",
+    "thop>=0.1.1.post2209072238",
+    "torch",
+    "torchvision",
+]
+
+[tool.uv.sources]
+torch = { url = "https://developer.download.nvidia.com/compute/redist/jp/v512/pytorch/torch-2.1.0a0+41361538.nv23.06-cp38-cp38-linux_aarch64.whl" }
+torchvision = { path = "../wheels/torchvision-0.16.1-cp38-cp38-linux_aarch64.whl" }
+
+[project.scripts]
+example-pkg = "example_pkg:main"
+
+[build-system]
+requires = ["uv_build>=0.8.22,<0.9.0"]
+build-backend = "uv_build"
