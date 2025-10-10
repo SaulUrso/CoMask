@@ -3,7 +3,7 @@ from typing import List
 import torch
 import torchvision.transforms as T
 from datasets import DatasetDict, load_dataset
-
+import numpy as np
 
 def load_cifar10():
     dataset = load_dataset("uoft-cs/cifar10")
@@ -13,8 +13,8 @@ def load_cifar10():
     # Define the torchvision transforms
     transform_tv = T.Compose(
         [
-            T.ToTensor(),  # Convert PIL Image or numpy array to tensor
-            T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),  # Normalization
+            T.ToTensor(),  
+            T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),  
         ]
     )
 
@@ -58,3 +58,12 @@ class CustomImageBatch:
 
     def __len__(self):
         return len(self.labels)
+    
+
+def combine_batches(batches):
+    full_x = torch.from_numpy(np.asarray([])).float()
+    full_y = torch.from_numpy(np.asarray([])).long()
+    for (batched_x, batched_y) in batches:
+        full_x = torch.cat((full_x, batched_x), 0)
+        full_y = torch.cat((full_y, batched_y), 0)
+    return [(full_x, full_y)]

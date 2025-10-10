@@ -1,4 +1,6 @@
+import pickle
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -48,12 +50,20 @@ def dirichlet_partition(
     trial: int = 0
     while min_size < min_require_size:
         idx_batch = [[] for _ in range(num_clients)]
+
+        # first sample proportions in order to make it independent of sample amount for random number
+        class_proportions = []
         for k in range(K):
-            idx_k = np.where(y == k)[0]
-            np.random.shuffle(idx_k)
             proportions: np.ndarray[Any, np.dtype[np.float64]] = np.random.dirichlet(
                 np.repeat(data_split_alpha, num_clients)
             )
+            print(proportions)
+            class_proportions.append(proportions)
+
+        for k in range(K):
+            idx_k = np.where(y == k)[0]
+            proportions: np.ndarray[Any, np.dtype[np.float64]] = class_proportions[k]
+            np.random.shuffle(idx_k)
 
             ## Balance
             if self_balancing:
@@ -69,6 +79,10 @@ def dirichlet_partition(
 
         if trial >= 10:
             raise ValueError(f"Max number of attempts {trial} reached, try a different alpha.")
+
+        # TODO: hotfix to ensure test and train have same distribution. Fix later.
+        if min_size < min_require_size:
+            raise ValueError(f"Min size of {min_size} < {min_require_size} , try a different alpha.")
 
     for j in range(num_clients):
         np.random.shuffle(idx_batch[j])
@@ -372,3 +386,50 @@ def create_personalized_test_sets(
         client_test_sets.append(client_test_set)
 
     return client_test_sets, client_class_list
+
+
+def create_and_save_partition(
+    dataset: Dataset,
+    num_clients: int,
+    method: PartitioningMethod,
+    save_path: str,
+    label_column: str = "label",
+    **partition_kwargs,
+) -> Dict[int, List[int]]:
+    """
+    Create partition using your existing partition_labels function and save indices.
+
+    Args:
+        dataset: HuggingFace dataset
+        num_clients: Number of clients
+        method: Partitioning method ("uniform", "shard", "dirichlet", "class")
+        save_path: Path to save partition indices
+        label_column: Name of label column in dataset
+        **partition_kwargs: Additional args for partition method (e.g., data_split_alpha, seed)
+
+    Returns:
+        Dictionary mapping client_id -> list of indices
+    """
+    # Extract labels
+    labels = np.array(dataset[label_column])
+
+    # Use YOUR partition_labels function
+    client_indices = partition_labels(method, labels, num_clients, **partition_kwargs)
+
+    # Save indices
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(save_path, "wb") as f:
+        pickle.dump(client_indices, f)
+
+    print(f"✓ Created {method} partition with {num_clients} clients")
+    print(f"✓ Saved to {save_path}")
+
+    return client_indices
+
+
+def load_partition_indices(load_path: str) -> Dict[int, List[int]]:
+    """Load saved partition indices"""
+    with open(load_path, "rb") as f:
+        partitions = pickle.load(f)
+    print(f"✓ Loaded partition from {load_path}")
+    return partitions
