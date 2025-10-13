@@ -433,3 +433,60 @@ def load_partition_indices(load_path: str) -> Dict[int, List[int]]:
         partitions = pickle.load(f)
     print(f"✓ Loaded partition from {load_path}")
     return partitions
+
+
+def partition_dataset_natural(
+    dataset: Dataset,
+    feature_column: str,
+    min_samples_per_client: int = 10,
+) -> List[Dataset]:
+    """Partition dataset naturally based on feature values (e.g., writer ID for FEMNIST).
+
+    Each unique value in the specified feature column becomes a separate client partition.
+    This is useful for datasets like FEMNIST where natural client boundaries exist
+    (e.g., different writers).
+
+    Args:
+        dataset (Dataset): The HuggingFace dataset to partition
+        feature_column (str): Name of the feature column to partition by
+        max_clients (int, optional): Maximum number of clients. If None, uses all unique values.
+        min_samples_per_client (int, optional): Minimum samples per client. Clients with fewer
+            samples are filtered out. Defaults to 1.
+
+    Returns:
+        List[Dataset]: List of client datasets, one per unique feature value
+
+    Raises:
+        ValueError: If feature_column is not in dataset or no valid clients found
+    """
+    if feature_column not in dataset.column_names:
+        raise ValueError(f"Feature column '{feature_column}' not found in dataset columns: {dataset.column_names}")
+
+    # Get unique feature values
+    feature_values = np.array(dataset[feature_column])
+    unique_values = np.unique(feature_values)
+    print(f"UNIQUE values = {len(unique_values)}")
+
+    # Group indices by feature value
+    client_data_indices = {}
+    for value in unique_values:
+        indices = np.where(feature_values == value)[0].tolist()
+        if len(indices) < min_samples_per_client:
+            raise ValueError(f"Expected {min_samples_per_client} samples but found {len(indices)} samples.")
+        client_data_indices[value] = indices
+
+    # Create client datasets
+    client_datasets = []
+    for value in sorted(client_data_indices.keys()):
+        indices = client_data_indices[value]
+        client_dataset = dataset.select(indices)
+        client_datasets.append(client_dataset)
+
+    print(f"✓ Created natural partition with {len(client_datasets)} clients based on '{feature_column}'")
+    print(
+        f"✓ Samples per client: min={min([len(ds) for ds in client_datasets])}, "
+        f"max={max([len(ds) for ds in client_datasets])}, "
+        f"mean={np.mean([len(ds) for ds in client_datasets]):.1f}"
+    )
+
+    return client_datasets

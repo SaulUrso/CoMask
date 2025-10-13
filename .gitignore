@@ -13,3 +13,16 @@ wheels/
 #logs
 log*
 wandb
+*.log
+
+#tests
+test*
+
+# Notes
+Notes.md
+
+#other junk
+*.pkl
+
+
+*HAR*
