@@ -14,12 +14,13 @@ wheels/
 log*
 wandb
 *.log
+*.yaml
+!sweep_config.yaml
 
 #tests
 test*
 
 #task2vec directory
-task2vec/*
 
 # Notes
 Notes.md
