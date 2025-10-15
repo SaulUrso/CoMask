@@ -16,36 +16,14 @@ from tesifedml.data.adapters import FedMLAdapter
 from tesifedml.data.dataload import load_my_data
 from tesifedml.data.partition import partition
 from tesifedml.models.cnn import HARBox_CNN
+from tesifedml.utils import initialize_and_override_config
+
+
+
+
 
 if __name__ == "__main__":
-    run = wandb.init()
-    assert run is not None
-
-    i = sys.argv.index("--cf")
-
-    # Load base config
-    with open(sys.argv[i + 1], "r") as f:
-        config = yaml.safe_load(f)
-
-    # Override with sweep params
-    for key, value in wandb.config.items():
-        if isinstance(value, dict):
-            nest_conf = config[key]
-            for nest_key, nest_value in value.items():
-                nest_conf[nest_key] = nest_value
-                print(f"Sweep setting: {nest_key} = {nest_value}")
-
-    # Save modified config
-    sweep_config_path = f"sweep_config_{run.id}.yaml"
-    print(sweep_config_path)
-    with open(sweep_config_path, "w") as f:
-        yaml.dump(config, f)
-
-    # find and replace the filename
-    if "--cf" in sys.argv:
-        i = sys.argv.index("--cf")
-        if i + 1 < len(sys.argv):
-            sys.argv[i + 1] = sweep_config_path
+    initialize_and_override_config()
 
     args = fedml.init()
 
@@ -68,12 +46,13 @@ if __name__ == "__main__":
     train_partitions = partition(
         train_dataset, args.partition_method, method_name=method_name, client_num=num_clients, feature_col="user_id"
     )
-    # if args.partition_method == "natural":
+
     test_partitions = partition(
         test_dataset, args.partition_method, method_name=method_name, client_num=num_clients, feature_col="user_id"
     )
-    # else:
-    #     test_partitions, client_classes = create_personalized_test_sets(train_partitions, test_dataset)
+
+
+    args.client_num_in_total = len(train_partitions)
 
     dataset = FedMLAdapter.create_fedml_data_structure(
         train_partitions=train_partitions,
