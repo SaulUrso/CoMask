@@ -401,6 +401,68 @@ def create_personalized_test_sets(
     return client_test_sets, client_class_list
 
 
+def create_natural_test_sets(
+    client_datasets: List[Dataset],
+    test_set: Dataset,
+    feature_column: str,
+) -> List[Dataset]:
+    """Create personalized test sets for clients based on natural partitioning feature values.
+
+    For each client dataset (created from partition_dataset_natural), this function creates
+    a corresponding test set containing all test samples that have the same feature values
+    as the client's training data.
+
+    Args:
+        client_datasets (List[Dataset]): List of client datasets from partition_dataset_natural
+        test_set (Dataset): The global test dataset
+        feature_column (str): Name of the feature column used for natural partitioning
+
+    Returns:
+        List[Dataset]: List of personalized test datasets for each client
+
+    Raises:
+        ValueError: If feature_column is not found in datasets
+    """
+    if feature_column not in test_set.column_names:
+        raise ValueError(f"Feature column '{feature_column}' not found in test set columns: {test_set.column_names}")
+
+    client_test_sets = []
+    test_feature_values = np.array(test_set[feature_column])
+
+    for client_idx, client_data in enumerate(client_datasets):
+        if feature_column not in client_data.column_names:
+            raise ValueError(f"Feature column '{feature_column}' not found in client {client_idx} dataset columns: {client_data.column_names}")
+        
+        # Get unique feature values from this client's training data
+        client_feature_values = np.unique(client_data[feature_column])
+
+        assert len(client_feature_values) == 1
+        
+        # Find test samples that match any of the client's feature values
+        matching_indices = []
+        for value in client_feature_values:
+            indices = np.where(test_feature_values == value)[0]
+            matching_indices.extend(indices)
+        
+        assert len(matching_indices) == len(list(set(matching_indices)))
+        
+        # Create personalized test dataset for this client
+        if matching_indices:
+            client_test_set = test_set.select(matching_indices)
+        else:
+            # If no matching samples found, create empty dataset with same structure
+            client_test_set = None
+        
+        client_test_sets.append(client_test_set)
+
+    print(f"✓ Created {len(client_test_sets)} personalized test sets based on '{feature_column}'")
+    print(f"✓ Test samples per client: min={min([len(ds) for ds in client_test_sets if ds is not None])}, "
+          f"max={max([len(ds) for ds in client_test_sets if ds is not None])}, "
+          f"mean={np.mean([len(ds) for ds in client_test_sets if ds is not None]):.1f}")
+
+    return client_test_sets
+
+
 def create_and_save_partition(
     dataset: Dataset,
     num_clients: int,
@@ -503,3 +565,6 @@ def partition_dataset_natural(
     )
 
     return client_datasets
+
+
+

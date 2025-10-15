@@ -119,6 +119,8 @@ class FedMLAdapter:
 
         # Calculate and log per-client distributions
         for client_id, client_dataset in enumerate(client_datasets):
+            if client_dataset is None:
+                continue
             client_labels = np.array(client_dataset["label"])
 
             # Log individual client distribution
@@ -182,6 +184,9 @@ class FedMLAdapter:
         train_data_local_dict = {}
         test_data_local_dict = {}
 
+        null_count = 0
+        null_idexes = []
+
         for client_id, client_train_dataset in enumerate(train_partitions):
             # Set transform on the client training dataset
             client_train_dataset = client_train_dataset.with_transform(transform_fn)
@@ -196,7 +201,7 @@ class FedMLAdapter:
             )
 
             # Create local test dataset for this client
-            if test_partitions is not None:
+            if test_partitions is not None and test_partitions[client_id] is not None:
                 client_test_dataset = test_partitions[client_id]
                 client_test_dataset = client_test_dataset.with_transform(transform_fn)
 
@@ -208,8 +213,12 @@ class FedMLAdapter:
                     num_workers=num_workers,
                 )
             else:
-                # Fallback to global test data if no partition exists for this client
-                test_data_local_dict[client_id] = test_data_global
+                null_count += 1
+                null_idexes.append(client_id)
+                test_data_local_dict[client_id] = None
+
+        print(f"NULL_COUNT: {null_count}")
+        print(f"NULL_idexes: {null_idexes}")
 
         if full_batch:
             train_data_global = combine_batches(train_data_global)
@@ -220,6 +229,13 @@ class FedMLAdapter:
             test_data_local_dict = {
                 cid: combine_batches(test_data_local_dict[cid]) for cid in test_data_local_dict.keys()
             }
+
+            assert_one_batch(train_data_global, "train_data_global")
+            assert_one_batch(test_data_global, "test_data_global")
+            for cid, loader in train_data_local_dict.items():
+                assert_one_batch(loader, f"train_data_local_dict[{cid}]")
+            for cid, loader in test_data_local_dict.items():
+                assert_one_batch(loader, f"test_data_local_dict[{cid}]")
 
         # Log label distributions if requested
         if log_distributions:
@@ -237,3 +253,9 @@ class FedMLAdapter:
             test_data_local_dict,  # test_data_local_dict
             class_num,  # class_num
         )
+
+
+def assert_one_batch(dataloader, name):
+    if dataloader is None and "test_data_local" in name:
+        return
+    assert len(dataloader) == 1, f"{name} does not have exactly one batch (found {len(dataloader)})"
