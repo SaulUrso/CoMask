@@ -3,7 +3,7 @@ Framework Adapters for Your Federated Learning Setup
 Adapts your HuggingFace-based partitions to Flower and FedML
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 from datasets import Dataset as HFDataset
@@ -97,42 +97,44 @@ class FedMLAdapter:
     """Adapter for FedML framework"""
 
     @staticmethod
-    def log_label_distribution(partitions: Dict[int, List[int]], dataset: HFDataset, partition_name: str = "train"):
+    def log_label_distribution(
+        client_datasets: List[HFDataset], global_dataset: HFDataset, partition_name: str = "train"
+    ):
         """
         Log label distribution for each client to wandb.
 
         Args:
-            partitions: Dict mapping client_id -> list of indices
-            dataset: HuggingFace dataset containing labels
+            client_datasets: List of client HuggingFace datasets
+            global_dataset: Global HuggingFace dataset containing labels
             partition_name: Name prefix for wandb logging (e.g., "train", "test")
         """
-        labels = np.array(dataset["label"])
+        labels = np.array(global_dataset["label"])
 
         # Log global distribution
         wandb.log(
             {
-                f"{partition_name}/global_label_distribution": wandb.Histogram(labels),
+                f"{partition_name}/global_label_distribution": wandb.Histogram(labels.tolist()),
             }
         )
 
         # Calculate and log per-client distributions
-        for client_id, indices in partitions.items():
-            client_labels = labels[indices]
+        for client_id, client_dataset in enumerate(client_datasets):
+            client_labels = np.array(client_dataset["label"])
 
             # Log individual client distribution
             wandb.log(
                 {
-                    f"{partition_name}/client_{client_id}_label_distribution": wandb.Histogram(client_labels),
+                    f"{partition_name}/client_{client_id}_label_distribution": wandb.Histogram(client_labels.tolist()),
                 }
             )
 
     @staticmethod
     def create_fedml_data_structure(
-        partitions: Dict[int, List[int]],
+        train_partitions: List[HFDataset],
         train_dataset: HFDataset,
         test_dataset: HFDataset,
         transform_fn,
-        test_partitions: Optional[Dict[int, List[int]]] = None,
+        test_partitions: Optional[List[HFDataset]] = None,
         batch_size: int = 32,
         num_workers: int = 0,
         log_distributions: bool = True,
@@ -141,6 +143,13 @@ class FedMLAdapter:
         Create FedML's expected data structure.
 
         Args:
+            train_partitions: List of client training datasets
+            train_dataset: Global training dataset
+            test_dataset: Global test dataset
+            transform_fn: Transform function to apply to datasets
+            test_partitions: Optional list of client test datasets
+            batch_size: Batch size for dataloaders
+            num_workers: Number of workers for dataloaders
             log_distributions: Whether to log label distributions to wandb
 
         Returns:
@@ -148,7 +157,6 @@ class FedMLAdapter:
                      test_data_global, train_data_local_num_dict,
                      train_data_local_dict, test_data_local_dict, class_num)
         """
-        client_num = len(partitions)
         # Number of classes
         class_num = len(np.unique(train_dataset["label"]))
 
@@ -174,24 +182,26 @@ class FedMLAdapter:
         train_data_local_dict = {}
         test_data_local_dict = {}
 
-        for client_id, indices in partitions.items():
-            # Create local training dataset
-            local_hf_dataset = train_dataset.select(indices)
-            local_hf_dataset.set_transform(transform_fn)
+        for client_id, client_train_dataset in enumerate(train_partitions):
+            # Set transform on the client training dataset
+            client_train_dataset = client_train_dataset.with_transform(transform_fn)
 
-            train_data_local_num_dict[client_id] = len(indices)
+            train_data_local_num_dict[client_id] = len(client_train_dataset)
             train_data_local_dict[client_id] = DataLoader(
-                local_hf_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=num_workers
+                client_train_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                collate_fn=collate_fn,
+                num_workers=num_workers,
             )
 
             # Create local test dataset for this client
-            if test_partitions is not None and client_id in test_partitions:
-                test_indices = test_partitions[client_id]
-                local_test_hf_dataset = test_dataset.select(test_indices)
-                local_test_hf_dataset.set_transform(transform_fn)
+            if test_partitions is not None:
+                client_test_dataset = test_partitions[client_id]
+                client_test_dataset = client_test_dataset.with_transform(transform_fn)
 
                 test_data_local_dict[client_id] = DataLoader(
-                    local_test_hf_dataset,
+                    client_test_dataset,
                     batch_size=batch_size,
                     shuffle=False,
                     collate_fn=collate_fn,
@@ -213,7 +223,7 @@ class FedMLAdapter:
 
         # Log label distributions if requested
         if log_distributions:
-            FedMLAdapter.log_label_distribution(partitions, train_dataset, "train")
+            FedMLAdapter.log_label_distribution(train_partitions, train_dataset, "train")
             if test_partitions is not None:
                 FedMLAdapter.log_label_distribution(test_partitions, test_dataset, "test")
 
