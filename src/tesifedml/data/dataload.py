@@ -14,11 +14,13 @@ from .data_pre import NUM_OF_TOTAL_USERS, load_data
 sys.path.append(os.path.join(os.path.dirname(__file__), "../../../large_scale_HARBox"))
 
 
-def load_my_data(dataset_name):
+def load_my_data(dataset_name, **kwargs):
     if dataset_name == "cifar10":
         dataset, trs = load_cifar10()
     elif dataset_name == "harbox":
         dataset, trs = load_harbox()
+    elif dataset_name == "femnist":
+        dataset, trs = load_femnist(**kwargs)
     else:
         raise ValueError(f"{dataset_name} is an unknown dataset.")
 
@@ -69,10 +71,13 @@ def load_femnist(test_only_users=None, test_only_user_seed=42):
     def transforms_tv(examples):
         # FEMNIST is 28 x 28 greyscale images (only 1 channel, but you can replicate if need 3, ofc it's useless)
         pixel_values = [transform_tv(image.convert("L")) for image in examples["image"]]
-        return {"pixel_values": pixel_values, "label": examples["character"]}
+        return {"pixel_values": pixel_values, "label": examples["label"]}
+
+    # adding label column (called character originally)
+    dataset["train"] = dataset["train"].rename_column("character", "label")
 
     # Handle test_only users if specified
-    if test_only_users is not None:
+    if test_only_users is not None and test_only_users > 0:
         if isinstance(test_only_users, int):
             # Get unique writer_ids from train set
             train_writer_ids = list(set(dataset["train"]["writer_id"]))
@@ -104,6 +109,7 @@ def load_femnist(test_only_users=None, test_only_user_seed=42):
 
     # Now create train/test splits from remaining train data
     # Group remaining train data by writer_id
+    print("iterating writer")
     writer_data = {}
     for i, writer_id in enumerate(dataset["train"]["writer_id"]):
         if writer_id not in writer_data:
@@ -114,20 +120,22 @@ def load_femnist(test_only_users=None, test_only_user_seed=42):
     train_indices = []
     test_indices = []
 
+    print("iterating train-test split")
     for writer_id, indices in writer_data.items():
         if len(indices) >= 100:
             # Split 80/20 for train/test
             indices_array = np.array(indices)
-            labels = [dataset["train"]["character"][i] for i in indices]
+            # labels = [dataset["train"]["character"][i] for i in indices]
 
-            train_idx, test_idx = train_test_split(indices_array, test_size=0.2, random_state=42, stratify=labels)
+            train_idx, test_idx = train_test_split(
+                indices_array, test_size=0.2, random_state=42
+            )  # TODO: discuss stratify=labels
             train_indices.extend(train_idx.tolist())
             test_indices.extend(test_idx.tolist())
         else:
             # All data goes to train (less than 100 samples)
             train_indices.extend(indices)
 
-    # Create final dataset splits
     dataset_dict = {}
     if train_indices:
         dataset_dict["train"] = dataset["train"].select(train_indices)
@@ -254,7 +262,7 @@ def load_harbox(test_only_users=None, test_only_user_seed=42):
     """
     # Convert test_only_users to 0-indexed set
     test_only_user_ids = set()
-    if test_only_users is not None:
+    if test_only_users is not None and test_only_users > 0:
         if isinstance(test_only_users, int):
             # Randomly sample test_only_users number of user IDs
             np.random.seed(test_only_user_seed)
@@ -317,9 +325,13 @@ class CustomImageBatch:
 
 
 def combine_batches(batches):
+    if batches is None:
+        return None
     full_x = torch.from_numpy(np.asarray([])).float()
     full_y = torch.from_numpy(np.asarray([])).long()
     for batched_x, batched_y in batches:
         full_x = torch.cat((full_x, batched_x), 0)
         full_y = torch.cat((full_y, batched_y), 0)
+    assert len(full_x) > 0
+    assert len(full_y) > 0
     return [(full_x, full_y)]
