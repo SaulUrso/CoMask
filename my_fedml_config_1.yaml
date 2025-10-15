@@ -1,0 +1,42 @@
+common_args:
+  training_type: "simulation"
+  random_seed: 0
+
+data_args:
+  dataset: "cifar10"
+  data_cache_dir: "./data"
+  partition_method: "label"  # Using custom partitioning
+  method_name: "dirichlet"
+
+model_args:
+  model: "resnet18"
+
+train_args:
+  federated_optimizer: "FedAvg"
+  client_id_list: "[]"  # Adjust based on num_clients
+  client_num_in_total: 100
+  client_num_per_round: 10
+  comm_round: 200
+  learning_rate: 0.1
+  weight_decay: 0.01
+  epochs: 5
+  batch_size: -1
+  client_optimizer: "sgd"
+
+
+validation_args:
+  frequency_of_the_test: 10
+
+device_args:
+  using_gpu: true
+  gpu_id: 0
+
+comm_args:
+  backend: "sp"
+
+tracking_args:
+  enable_wandb: true
+  wandb_entity: s-urso2
+  wandb_project: "FedCIFAR10"
+  run_name: "run_resnet18_cifar10"
+
