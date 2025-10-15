@@ -1,13 +1,25 @@
 import copy
-from typing import Iterable
+from typing import Any, Dict, Iterable, List, Tuple
 
 import numpy as np
 import torch
 from sklearn.cluster import AffinityPropagation, AgglomerativeClustering
 
+from datasets import Dataset
+
+
+def perform_clustering_task2vec(client_data_list,args) :
+
+    backbone = args.backbone
+
 
 def perform_clustering_svd(client_data_list, args):
     U_clients = []
+
+    required_fields = ["n_basis", "client_num_in_total", "preference"]
+    for field in required_fields:
+        if not hasattr(args, field):
+            raise AttributeError(f"args is missing required field: '{field}'")
 
     K = args.n_basis  # 5 by default
 
@@ -51,7 +63,7 @@ def perform_clustering_svd(client_data_list, args):
         print(f"Client {idx} - Shape of U: {U_clients[-1].shape}")
 
     ###################################### Clustering
-    sim_mat = -calculating_adjacency(range(args.num_clients), U_clients)
+    sim_mat = -calculating_adjacency(range(args.client_num_in_total), U_clients)
     np.fill_diagonal(sim_mat, 0)  # Set diagonal to 0 for self-similarity
 
     cluster_labels, cluster_centers = perform_clustering(sim_mat, method="affinity", preference=args.preference)
@@ -88,74 +100,6 @@ def calculating_adjacency(clients_idxs, U):
             sim_mat[idx1, idx2] = np.min(np.arccos(mul)) * 180 / np.pi
 
     return sim_mat
-
-
-def hierarchical_clustering(A, thresh=1.5, linkage="maximum"):
-    """
-    Hierarchical Clustering Algorithm. It is based on single linkage, finds the minimum element and merges
-    rows and columns replacing the minimum elements. It is working on adjacency matrix.
-
-    :param: A (adjacency matrix), thresh (stopping threshold)
-    :type: A (np.array), thresh (int)
-
-    :return: clusters
-    """
-    label_assg = {i: i for i in range(A.shape[0])}
-
-    step = 0
-    while A.shape[0] > 1:
-        np.fill_diagonal(A, -np.NINF)
-        # print(f'step {step} \n {A}')
-        step += 1
-        ind = np.unravel_index(np.argmin(A, axis=None), A.shape)
-
-        if A[ind[0], ind[1]] > thresh:
-            print("Breaking HC")
-            break
-        else:
-            np.fill_diagonal(A, 0)
-            if linkage == "maximum":
-                Z = np.maximum(A[:, ind[0]], A[:, ind[1]])
-            elif linkage == "minimum":
-                Z = np.minimum(A[:, ind[0]], A[:, ind[1]])
-            elif linkage == "average":
-                Z = (A[:, ind[0]] + A[:, ind[1]]) / 2
-
-            A[:, ind[0]] = Z
-            A[:, ind[1]] = Z
-            A[ind[0], :] = Z
-            A[ind[1], :] = Z
-            A = np.delete(A, (ind[1]), axis=0)
-            A = np.delete(A, (ind[1]), axis=1)
-
-            if type(label_assg[ind[0]]) is list:
-                label_assg[ind[0]].append(label_assg[ind[1]])
-            else:
-                label_assg[ind[0]] = [label_assg[ind[0]], label_assg[ind[1]]]
-
-            label_assg.pop(ind[1], None)
-
-            temp = []
-            for k, v in label_assg.items():
-                if k > ind[1]:
-                    kk = k - 1
-                    vv = v
-                else:
-                    kk = k
-                    vv = v
-                temp.append((kk, vv))
-
-            label_assg = dict(temp)
-
-    clusters = []
-    for k in label_assg.keys():
-        if type(label_assg[k]) is list:
-            clusters.append(list(flatten(label_assg[k])))
-        elif type(label_assg[k]) is int:
-            clusters.append([label_assg[k]])
-
-    return clusters
-
 
 def perform_clustering(matrix, method="affinity", preference=None):
     """
@@ -207,3 +151,25 @@ def ideal_clusters(client_classes):
         clusters[classes_tuple].append(client_idx)
 
     return list(clusters.values())
+
+
+class RemappedSubset:
+    """
+    Custom dataset wrapper that applies a remapping of class labels.
+
+    Attributes:
+        original_dataset (Dataset): The original dataset.
+        indices (List[int]): Indices of the subset.
+        class_mapping (Dict[int, int]): Mapping from original class labels to new labels.
+    """
+    def __init__(self, client_partition: Dataset, class_mapping: Dict[int, int]):
+        self.dataset = client_partition
+        self.class_mapping = class_mapping
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, idx: int):
+        sample = self.dataset[idx]
+        sample["label"] = self.class_mapping[sample["label"]]
+        return sample
