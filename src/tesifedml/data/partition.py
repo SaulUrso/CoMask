@@ -10,6 +10,19 @@ from torch.utils.data import Dataset as _TDataset
 from typing_extensions import Literal
 
 
+def partition(dataset, partition_method, method_name=None, client_num=None, feature_col=None, **kwargs):
+    if partition_method == "natural":
+        assert feature_col is not None, "Feature col must be declared for natural partition"
+        return partition_dataset_natural(dataset, feature_column=feature_col)
+    elif partition_method == "label":
+        assert method_name is not None
+        assert client_num is not None
+        return partition_dataset_with_labels(method_name=method_name, dataset=dataset, num_clients=client_num,**kwargs)
+
+    else:
+        raise ValueError(f"{partition_method} is not a valid partition method.")
+
+
 def dirichlet_partition(
     y: np.ndarray,
     num_clients: int,
