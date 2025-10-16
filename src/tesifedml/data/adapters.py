@@ -164,7 +164,7 @@ class FedMLAdapter:
 
         full_batch = True if batch_size < 0 else False
         if full_batch:
-            batch_size = 128
+            batch_size = 1024
 
         # Wrap full datasets
         wrapped_train_dataset = train_dataset.with_transform(transform_fn)
@@ -172,11 +172,19 @@ class FedMLAdapter:
 
         # Global data loaders
         train_data_global = DataLoader(
-            wrapped_train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=num_workers
+            wrapped_train_dataset,  # type: ignore
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
         )
 
         test_data_global = DataLoader(
-            wrapped_test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=num_workers
+            wrapped_test_dataset,  # type: ignore
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
         )
 
         # Local data for each client
@@ -193,11 +201,10 @@ class FedMLAdapter:
 
             train_data_local_num_dict[client_id] = len(client_train_dataset)
             train_data_local_dict[client_id] = DataLoader(
-                client_train_dataset,
+                client_train_dataset,  # type: ignore
                 batch_size=batch_size,
                 shuffle=True,
                 collate_fn=collate_fn,
-                num_workers=num_workers,
             )
 
             # Create local test dataset for this client
@@ -206,11 +213,10 @@ class FedMLAdapter:
                 client_test_dataset = client_test_dataset.with_transform(transform_fn)
 
                 test_data_local_dict[client_id] = DataLoader(
-                    client_test_dataset,
+                    client_test_dataset,  # type: ignore
                     batch_size=batch_size,
                     shuffle=False,
                     collate_fn=collate_fn,
-                    num_workers=num_workers,
                 )
             else:
                 null_count += 1
@@ -221,8 +227,8 @@ class FedMLAdapter:
         print(f"NULL_idexes: {null_idexes}")
 
         if full_batch:
-            train_data_global = combine_batches(train_data_global)
-            test_data_global = combine_batches(test_data_global)
+            # train_data_global = combine_batches(train_data_global)
+            # test_data_global = combine_batches(test_data_global)
             train_data_local_dict = {
                 cid: combine_batches(train_data_local_dict[cid]) for cid in train_data_local_dict.keys()
             }
@@ -230,8 +236,8 @@ class FedMLAdapter:
                 cid: combine_batches(test_data_local_dict[cid]) for cid in test_data_local_dict.keys()
             }
 
-            assert_one_batch(train_data_global, "train_data_global")
-            assert_one_batch(test_data_global, "test_data_global")
+            # assert_one_batch(train_data_global, "train_data_global")
+            # assert_one_batch(test_data_global, "test_data_global")
             for cid, loader in train_data_local_dict.items():
                 assert_one_batch(loader, f"train_data_local_dict[{cid}]")
             for cid, loader in test_data_local_dict.items():
