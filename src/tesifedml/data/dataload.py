@@ -1,6 +1,6 @@
 import os
 import sys
-from typing import List
+from typing import List, Union
 
 import numpy as np
 import torch
@@ -59,8 +59,7 @@ def load_femnist(test_only_users=None, test_only_user_seed=42):
 
     assert isinstance(dataset, DatasetDict)
 
-    # TODO: add normalization
-    # TODO: in partition group them together because some clients have too low data, go check papers to see how they do it
+    # dataset["train"] = dataset["train"].sort("writer_id")
 
     transform_tv = T.Compose(
         [
@@ -80,13 +79,11 @@ def load_femnist(test_only_users=None, test_only_user_seed=42):
     if test_only_users is not None and test_only_users > 0:
         if isinstance(test_only_users, int):
             # Get unique writer_ids from train set
-            train_writer_ids = list(set(dataset["train"]["writer_id"]))
+            train_writer_ids = np.unique(dataset["train"]["writer_id"])
 
             # Randomly sample test_only_users number of writer IDs
-            np.random.seed(test_only_user_seed)
-            test_only_writer_ids = set(
-                np.random.choice(train_writer_ids, size=min(test_only_users, len(train_writer_ids)), replace=False)
-            )
+            rng = np.random.default_rng(test_only_user_seed)
+            test_only_writer_ids = rng.choice(train_writer_ids, size=test_only_users, replace=False)
 
             # Split train dataset
             train_indices = []
@@ -120,8 +117,8 @@ def load_femnist(test_only_users=None, test_only_user_seed=42):
     train_indices = []
     test_indices = []
 
-    print("iterating train-test split")
-    for writer_id, indices in writer_data.items():
+    for writer_id in sorted(writer_data.keys()):  # ← Sort the keys!
+        indices = writer_data[writer_id]
         if len(indices) >= 100:
             # Split 80/20 for train/test
             indices_array = np.array(indices)
@@ -159,24 +156,24 @@ def _load_user_data(user_id):
         return None, None
 
 
-def _split_user_data(x_data, y_data, user_id_0indexed):
+def _split_user_data(x_data, y_data, user_id):
     """Split a user's data into train/test (80/20)."""
     if x_data.shape[0] < 5:
         # If user has very little data, put all in train
         return {
-            "train": (x_data, y_data, np.full(x_data.shape[0], user_id_0indexed)),
+            "train": (x_data, y_data, np.full(x_data.shape[0], user_id)),
             "test": (np.empty((0, x_data.shape[1])), np.empty(0), np.empty(0, dtype=int)),
         }
 
     x_train, x_test, y_train, y_test = train_test_split(x_data, y_data, test_size=0.2, random_state=42, stratify=y_data)
 
-    train_user_ids = np.full(x_train.shape[0], user_id_0indexed)
-    test_user_ids = np.full(x_test.shape[0], user_id_0indexed)
+    train_user_ids = np.full(x_train.shape[0], user_id)
+    test_user_ids = np.full(x_test.shape[0], user_id)
 
     return {"train": (x_train, y_train, train_user_ids), "test": (x_test, y_test, test_user_ids)}
 
 
-def _collect_user_data(test_only_user_ids):
+def _collect_user_data(test_only_user_ids: Union[List,np.ndarray]):
     """Collect and organize data from all users."""
 
     data_splits = {
@@ -191,16 +188,14 @@ def _collect_user_data(test_only_user_ids):
         if x_data is None or x_data.shape[0] == 0:
             continue
 
-        user_id_0indexed = user_id - 1
-
-        if user_id_0indexed in test_only_user_ids:
+        if user_id in test_only_user_ids:
             # Test-only user
             data_splits["test_only"]["x"].append(x_data)
             data_splits["test_only"]["y"].append(y_data)
-            data_splits["test_only"]["users"].append(np.full(x_data.shape[0], user_id_0indexed))
+            data_splits["test_only"]["users"].append(np.full(x_data.shape[0], user_id))
         else:
             # Regular user - split into train/test
-            splits = _split_user_data(x_data, y_data, user_id_0indexed)
+            splits = _split_user_data(x_data, y_data, user_id)
 
             for split_name in ["train", "test"]:
                 x_split, y_split, user_ids_split = splits[split_name]
@@ -249,6 +244,7 @@ def _create_dataset_dict(data_splits):
 
 
 def load_harbox(test_only_users=None, test_only_user_seed=42):
+    # TODO: check how split is done for test only
     """
     Load HARBox dataset using functions from data_pre.py.
 
@@ -261,14 +257,14 @@ def load_harbox(test_only_users=None, test_only_user_seed=42):
         transforms_tv: Transform function to apply to examples
     """
     # Convert test_only_users to 0-indexed set
-    test_only_user_ids = set()
+    test_only_user_ids = []
     if test_only_users is not None and test_only_users > 0:
         if isinstance(test_only_users, int):
             # Randomly sample test_only_users number of user IDs
-            np.random.seed(test_only_user_seed)
-            all_user_ids = list(range(NUM_OF_TOTAL_USERS))  # 0-indexed
-            sampled_ids = np.random.choice(all_user_ids, size=min(test_only_users, NUM_OF_TOTAL_USERS), replace=False)
-            test_only_user_ids = set(sampled_ids)
+            rng = np.random.default_rng(test_only_user_seed)
+            all_user_ids = list(range(1, NUM_OF_TOTAL_USERS + 1))
+            sampled_ids = rng.choice(all_user_ids, size=test_only_users, replace=False)
+            test_only_user_ids = sampled_ids
         else:
             raise ValueError("test_only_users must be None or an integer")
 
@@ -283,7 +279,7 @@ def load_harbox(test_only_users=None, test_only_user_seed=42):
     dataset = _create_dataset_dict(data_splits)
 
     # TODO: CHANGE IF YOU USE SOME CLIENTS FOR SPLITS
-    transform_tv = T.Compose([T.ToTensor(), T.Normalize(-1.807077, 17.650785)])
+    transform_tv = T.Compose([T.ToTensor(),T.Normalize(-1.777955, 17.569693) ]) 
 
     def transforms_tv(examples):
         pixel_values = [transform_tv(np.array(image, dtype=np.float32)) for image in examples["features"]]
