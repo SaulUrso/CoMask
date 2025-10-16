@@ -13,7 +13,7 @@ label = [0, 1, 2, 3, 4]
 
 NUM_OF_CLASS = 5
 DIMENSION_OF_FEATURE = 900
-NUM_OF_TOTAL_USERS = 116
+NUM_OF_TOTAL_USERS = 120
 
 
 def load_data(user_id):
