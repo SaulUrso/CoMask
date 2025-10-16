@@ -57,7 +57,7 @@ def dirichlet_partition(
     K: int = len(np.unique(y))
 
     N: int = y.shape[0]
-    np.random.seed(seed)
+    rng = np.random.default_rng(seed)
     client_data_indices: Dict[int, List[int]] = {}
     idx_batch: List[List[int]] = [[] for _ in range(num_clients)]
     trial: int = 0
@@ -67,7 +67,7 @@ def dirichlet_partition(
         # first sample proportions in order to make it independent of sample amount for random number
         class_proportions = []
         for k in range(K):
-            proportions: np.ndarray[Any, np.dtype[np.float64]] = np.random.dirichlet(
+            proportions: np.ndarray[Any, np.dtype[np.float64]] = rng.dirichlet(
                 np.repeat(data_split_alpha, num_clients)
             )
             print(proportions)
@@ -76,7 +76,7 @@ def dirichlet_partition(
         for k in range(K):
             idx_k = np.where(y == k)[0]
             proportions: np.ndarray[Any, np.dtype[np.float64]] = class_proportions[k]
-            np.random.shuffle(idx_k)
+            rng.shuffle(idx_k)
 
             ## Balance
             if self_balancing:
@@ -98,7 +98,7 @@ def dirichlet_partition(
             raise ValueError(f"Min size of {min_size} < {min_require_size} , try a different alpha.")
 
     for j in range(num_clients):
-        np.random.shuffle(idx_batch[j])
+        rng.shuffle(idx_batch[j])
         client_data_indices[j] = idx_batch[j]
 
     return client_data_indices
@@ -126,10 +126,10 @@ def uniform_partition(
     # Collect sample indices by class
     class_indices = {c: np.where(y == c)[0] for c in range(num_classes)}
 
-    np.random.seed(seed)
+    rng = np.random.default_rng(seed)
 
     for c, indices in class_indices.items():
-        np.random.shuffle(indices)  # Shuffle indices for each class
+        rng.shuffle(indices)  # Shuffle indices for each class
         splits = np.array_split(indices, num_clients)  # Split indices among clients
         for client_id, split in enumerate(splits):
             client_data_indices[client_id].extend(split)
@@ -158,13 +158,13 @@ def class_partition(
     """
     K: int = len(np.unique(y))
     client_data_indices: Dict[int, List[int]] = defaultdict(list)
-    np.random.seed(seed)
+    rng = np.random.default_rng(seed)
 
     if classes == 10:
         client_data_indices = {i: [] for i in range(num_clients)}
         for i in range(10):
             idx_k = np.where(y == i)[0]
-            np.random.shuffle(idx_k)
+            rng.shuffle(idx_k)
             split = np.array_split(idx_k, num_clients)
             for j in range(num_clients):
                 client_data_indices[j] = list(np.append(client_data_indices[j], split[j]))
@@ -176,7 +176,7 @@ def class_partition(
             times[i % K] += 1
             j = 1
             while j < classes:
-                ind = np.random.randint(0, K)
+                ind = rng.integers(low=0, high=K)
                 if ind not in current:
                     j = j + 1
                     current.append(ind)
@@ -186,7 +186,7 @@ def class_partition(
         for i in range(K):
             if times[i] > 0:
                 idx_k = np.where(y == i)[0]
-                np.random.shuffle(idx_k)
+                rng.shuffle(idx_k)
                 split = np.array_split(idx_k, times[i])
                 ids = 0
                 for j in range(num_clients):
@@ -230,8 +230,8 @@ def shard_partition(
 
     shards = [sorted_indices[i * shard_size : (i + 1) * shard_size] for i in range(num_shards)]
 
-    np.random.seed(seed)
-    np.random.shuffle(shards)
+    rng = np.random.default_rng(seed)
+    rng.shuffle(shards)
 
     for i in range(num_clients):
         assigned_shards = shards[i * shards_per_client : (i + 1) * shards_per_client]
