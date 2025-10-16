@@ -49,6 +49,9 @@ class ClusterAPI(object):
             self.model_trainer,
         )
 
+    def run(self):
+        self.train()
+
     def _setup_clients(
         self,
         train_data_local_num_dict,
@@ -71,6 +74,14 @@ class ClusterAPI(object):
             group_to_client_indexes[group_idx].append(client_idx)
 
         self.group_dict = group_to_client_indexes
+
+        # if self.args.enable_wandb:
+        #     # Convert to in-memory JSON
+        #     json_buf = io.StringIO(json.dumps(self.group_dict))
+
+        #     artifact = wandb.Artifact("clusters", type="cluster_results")
+        #     artifact.add_file(json_buf, name="clusters.json")  #type: ignore
+        #     wandb.log_artifact(artifact)
 
         for client_idx in range(self.args.client_num_per_round):
             c = Client(

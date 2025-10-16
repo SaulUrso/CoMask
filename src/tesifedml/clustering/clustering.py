@@ -1,15 +1,13 @@
 import copy
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Dict, Iterable
 
 import numpy as np
 import torch
+from datasets import Dataset
 from sklearn.cluster import AffinityPropagation, AgglomerativeClustering
 
-from datasets import Dataset
 
-
-def perform_clustering_task2vec(client_data_list,args) :
-
+def perform_clustering_task2vec(client_data_list, args):
     backbone = args.backbone
 
 
@@ -43,6 +41,7 @@ def perform_clustering_svd(client_data_list, args):
             # obtain subset of the class - get pixel_values for this label's samples
             class_samples = []
             for sample_idx in idxs_local[cnt : cnt + cnt_labels[j]]:
+
                 pixel_values = train_ds_local[int(sample_idx)]["pixel_values"]
                 if isinstance(pixel_values, torch.Tensor):
                     pixel_values = pixel_values.numpy()
@@ -66,7 +65,9 @@ def perform_clustering_svd(client_data_list, args):
     sim_mat = -calculating_adjacency(range(args.client_num_in_total), U_clients)
     np.fill_diagonal(sim_mat, 0)  # Set diagonal to 0 for self-similarity
 
-    cluster_labels, cluster_centers = perform_clustering(sim_mat, method="affinity", preference=args.preference)
+    preference = args.preference if isinstance(args.preference, int) else None
+
+    cluster_labels, cluster_centers = perform_clustering(sim_mat, method="affinity", preference=preference)
 
     return cluster_labels, cluster_centers, sim_mat
 
@@ -100,6 +101,7 @@ def calculating_adjacency(clients_idxs, U):
             sim_mat[idx1, idx2] = np.min(np.arccos(mul)) * 180 / np.pi
 
     return sim_mat
+
 
 def perform_clustering(matrix, method="affinity", preference=None):
     """
@@ -162,6 +164,7 @@ class RemappedSubset:
         indices (List[int]): Indices of the subset.
         class_mapping (Dict[int, int]): Mapping from original class labels to new labels.
     """
+
     def __init__(self, client_partition: Dataset, class_mapping: Dict[int, int]):
         self.dataset = client_partition
         self.class_mapping = class_mapping

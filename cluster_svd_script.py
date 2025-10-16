@@ -69,7 +69,7 @@ if __name__ == "__main__":
         test_partitions=test_partitions,
         batch_size=args.batch_size,
         num_workers=getattr(args, "num_workers", 0),
-        log_distributions=True,
+        log_distributions=False,
     )
 
     # create dataloader for separate test if exists
@@ -103,8 +103,12 @@ if __name__ == "__main__":
     print(f"  - Output dimension (classes): {output_dim}")
 
     # start clustering
-    cluster_labels, cluster_centers, sim_mat = perform_clustering_svd(train_partitions, args)
-    args.clusters = cluster_labels
+    cluster_labels, cluster_centers, sim_mat = perform_clustering_svd(
+        [client_data.with_transform(transforms_tv) for client_data in train_partitions], args
+    )
+    args.cluster_indexes = cluster_labels
+
+    print(f"  - Number of clusters: {len(set(cluster_labels))}")
 
     if args.model == "resnet18":
         model = resnet18_cifar()
@@ -117,7 +121,6 @@ if __name__ == "__main__":
     else:
         model = fedml.model.create(args, output_dim)
 
-
-    # this should work, in reality all arguments but last are ignored
+    # # this should work, in reality all arguments but last are ignored
     fedml_runner = FedMLRunner(args, device, dataset, model, algorithm_flow=ClusterAPI(args, device, dataset, model))  # type: ignore
     fedml_runner.run()

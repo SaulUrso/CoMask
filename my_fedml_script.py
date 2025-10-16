@@ -71,7 +71,7 @@ if __name__ == "__main__":
         test_partitions=test_partitions,
         batch_size=args.batch_size,
         num_workers=getattr(args, "num_workers", 0),
-        log_distributions=True,
+        log_distributions=False,
     )
 
     # create dataloader for separate test if exists
