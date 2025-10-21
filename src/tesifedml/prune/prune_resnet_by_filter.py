@@ -1,3 +1,4 @@
+from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
@@ -37,7 +38,7 @@ def prune_conv(
 
         # this just creates an array of the indices of ones in the mask
         # the squeeze is used to make a flat array
-        out_idx = np.squeeze(np.argwhere(np.asarray(mask.cpu().numpy())))
+        out_idx: np.ndarray[Any, np.dtype[np.signedinteger[Any]]] = np.squeeze(np.argwhere(np.asarray(mask.cpu().numpy())))
         if out_idx.size == 1:
             out_idx = np.resize(out_idx, (1,))
 
@@ -56,7 +57,7 @@ def prune_conv(
             out_idx = np.array(sorted(np.concatenate((out_idx, res_idx))))
             # Update mask to reflect the additional kept filters
             mask = torch.zeros(len(weight_copy))
-            mask[out_idx] = 1.0
+            mask[out_idx] = 1.0 #type: ignore
 
     # Number of output channel
     out_filters = len(out_idx)

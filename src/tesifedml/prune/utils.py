@@ -18,7 +18,7 @@ def _get_prunable_layers(model):
 
     for name, module in model.named_modules():
         # NOTE: downsample is excluded from resnet18
-        if isinstance(module, nn.Conv2d) and "downsample" not in name:
+        if isinstance(module, nn.Conv2d) and "downsample" not in name and "depthwise" not in name:
             conv_layers.append((name, module))
         elif isinstance(module, nn.Linear):
             linear_layers.append((name, module))
@@ -163,7 +163,7 @@ def computer_conv_with_params(model, conv, param_counts, index, dim, dimension, 
     - Channel pruning: removes channel params + corresponding output channels in previous layer
     """
 
-    #TODO: when getting the next of a linear, 
+    # TODO: when getting the next of a linear,
     # Get prunable layers (excluding final classification layer)
     conv_layers, linear_layers = _get_prunable_layers(model)
     all_layers = conv_layers + linear_layers
@@ -184,7 +184,7 @@ def computer_conv_with_params(model, conv, param_counts, index, dim, dimension, 
             elif isinstance(next_layer, nn.Linear):
                 # Each filter removed eliminates params proportional to the spatial dimensions
                 # For the first linear layer after conv, this depends on the spatial size
-                return next_layer.weight.data.shape[0]  #* 25 - 5*5 spatial size assumption
+                return next_layer.weight.data.shape[0]  # * 25 - 5*5 spatial size assumption
         else:  # channel pruning - affects output channels of previous layer
             # This is more complex and typically handled differently in practice
             # For now, we'll use the same logic as filter pruning
