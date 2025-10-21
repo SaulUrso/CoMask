@@ -6,7 +6,6 @@ from .keywords import KEY_FILTER
 from .utils import (
     computer_conv_threshold,
     computer_weight,
-    count_parameters,
     create_batchnorm2d,
     create_conv2d,
     create_linear,
@@ -89,8 +88,9 @@ def prune_conv(
 
 def prune_features(module_list, conv_threshold, prune_way, minimum_channels=1, divisor=1):
     new_module_list = list()
-    masks = []
+    masks = {}  # Changed from list to dict
     idx = 0
+    layer_idx = 0  # Track layer index for naming
 
     # NOTE: for HARBox_CNN, input channels is 1
     in_channels = 1
@@ -117,7 +117,16 @@ def prune_features(module_list, conv_threshold, prune_way, minimum_channels=1, d
                 divisor=divisor,
             )
 
-            # Store mask information
+            # Store mask information with layer name
+            layer_name = f"conv_{layer_idx}"
+            masks[layer_name] = {
+                "mask": mask,
+                "layer_type": "conv",
+                "original_filters": conv_layer.out_channels,
+                "pruned_filters": in_channels,
+                "indices_kept": in_idx,
+            }
+            layer_idx += 1
 
             # Create new sequential block
             new_seq_block = nn.Sequential(new_conv2d, new_batchnorm2d)
@@ -127,8 +136,6 @@ def prune_features(module_list, conv_threshold, prune_way, minimum_channels=1, d
             new_module_list.append(new_conv2d)
             new_module_list.append(new_batchnorm2d)
             idx += 3
-
-            masks.append(mask)
 
         elif isinstance(module_list[idx], nn.Conv2d):
             # Handle standalone Conv2d layers (if any)
@@ -212,7 +219,9 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1):
     # Count parameters before pruning
     # total_params_before = count_parameters(model)
 
-    total,total_params_before, threshold = computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way=prune_way)
+    total, total_params_before, threshold = computer_conv_threshold(
+        model, percent, prune_type=KEY_FILTER, prune_way=prune_way
+    )
 
     feature_name_list = list()
     feature_module_list = list()
@@ -244,6 +253,16 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1):
         divisor=divisor,
     )
 
+    # Associate actual layer names with masks
+    named_masks = {}
+    conv_layer_count = 0
+    for name in feature_name_list:
+        if "conv" in name and name.endswith(".0"):  # Only for actual conv layers (not sequential or batchnorm)
+            mask_key = f"conv_{conv_layer_count}"
+            if mask_key in masks:
+                named_masks[name] = masks[mask_key]
+                conv_layer_count += 1
+
     assert len(new_module_list) == len(feature_module_list) == len(feature_name_list)
     set_module_list(model, feature_name_list, feature_module_list, new_module_list)
 
@@ -263,7 +282,9 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1):
     assert len(new_module_list) == len(classifier_module_list) == len(classifier_name_list)
     set_module_list(model, classifier_name_list, classifier_module_list, new_module_list)
 
-    new_total,total_params_after, _ = computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way=prune_way)
+    new_total, total_params_after, _ = computer_conv_threshold(
+        model, percent, prune_type=KEY_FILTER, prune_way=prune_way
+    )
 
     # Count parameters after pruning
     # total_params_after = count_parameters(model)
@@ -271,4 +292,4 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1):
     # Calculate parameter-based pruning ratio
     param_pruning_ratio = (total_params_before - total_params_after) / total_params_before
 
-    return model, param_pruning_ratio, threshold, masks
+    return model, param_pruning_ratio, threshold, named_masks

@@ -353,3 +353,81 @@ def set_module_list(model, name_list, module_list, new_module_list):
 def count_parameters(model):
     """Count total number of parameters in a model"""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def combine_mask(mask_1, mask_2):
+    """
+    Combine two pruning masks to obtain a mask relative to the original model.
+
+    This function takes the mask from the (n-1)th pruning operation and the mask from
+    the nth pruning operation, and combines them to produce a mask that represents
+    the cumulative effect of both pruning operations relative to the original model.
+
+    The logic is:
+    - mask_1: Represents which filters were kept in the first pruning (relative to original)
+    - mask_2: Represents which filters were kept in the second pruning (relative to already pruned model)
+    - combined_mask: Represents which original filters are kept after both prunings
+
+    Args:
+        mask_1 (dict): Mask dictionary from the first pruning operation (n-1)
+        mask_2 (dict): Mask dictionary from the second pruning operation (n)
+
+    Returns:
+        dict: Combined mask dictionary with the same structure as input masks,
+              but representing the cumulative effect relative to the original model
+
+    Example:
+        Original model has 64 filters in a layer.
+        After 1st pruning: keeps filters [0,2,4,6,8] (mask_1)
+        After 2nd pruning: keeps filters [0,1,3] from the already pruned model (mask_2)
+        Combined mask: keeps original filters [0,4,8] from the original 64 filters
+    """
+    combined_masks = {}
+
+    # Iterate through all layers in mask_1
+    for layer_name, mask_1_info in mask_1.items():
+        if layer_name not in mask_2:
+            # If this layer wasn't pruned in the second operation, just keep mask_1
+            combined_masks[layer_name] = mask_1_info.copy()
+            continue
+
+        mask_2_info = mask_2[layer_name]
+
+        # Get the original mask from first pruning (relative to original model)
+        original_mask_1 = mask_1_info["mask"]  # Boolean tensor indicating kept filters
+
+        # Get the mask from second pruning (relative to already pruned model)
+        mask_2_tensor = mask_2_info["mask"]
+
+        # Get indices that were kept in first pruning
+        kept_indices_1 = torch.where(original_mask_1 > 0)[0]
+
+        # Get indices that were kept in second pruning (relative to pruned model)
+        kept_indices_2 = torch.where(mask_2_tensor > 0)[0]
+
+        # Map the second pruning indices back to original model indices
+        # The filters kept in second pruning correspond to positions in the already pruned model
+        # So we need to map them back to original indices using kept_indices_1
+        final_kept_indices = kept_indices_1[kept_indices_2]
+
+        # Create combined mask relative to original model
+        combined_mask_tensor = torch.zeros_like(original_mask_1)
+        combined_mask_tensor[final_kept_indices] = 1.0
+
+        # Create combined mask info
+        combined_masks[layer_name] = {
+            "mask": combined_mask_tensor,
+            "layer_type": mask_1_info["layer_type"],
+            "original_filters": mask_1_info["original_filters"],  # This should be the same as original
+            "pruned_filters": len(final_kept_indices),
+            "indices_kept": final_kept_indices.numpy()
+            if isinstance(final_kept_indices, torch.Tensor)
+            else final_kept_indices,
+        }
+
+    # Also include any layers that were only in mask_2 (shouldn't happen in normal flow)
+    for layer_name, mask_2_info in mask_2.items():
+        if layer_name not in mask_1:
+            combined_masks[layer_name] = mask_2_info.copy()
+
+    return combined_masks
