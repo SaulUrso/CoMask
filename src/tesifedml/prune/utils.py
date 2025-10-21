@@ -17,7 +17,8 @@ def _get_prunable_layers(model):
     linear_layers = []
 
     for name, module in model.named_modules():
-        if isinstance(module, nn.Conv2d):
+        # NOTE: downsample is excluded from resnet18
+        if isinstance(module, nn.Conv2d) and "downsample" not in name:
             conv_layers.append((name, module))
         elif isinstance(module, nn.Linear):
             linear_layers.append((name, module))
@@ -154,31 +155,80 @@ def computer_conv(model, conv, index, dim, dimension, dimension_fc, prune_way):
 
 def computer_conv_with_params(model, conv, param_counts, index, dim, dimension, dimension_fc, prune_way):
     """
-    Computer importance scores and parameter counts for each group (filter/channel)
+    Computer importance scores and parameter counts for each group (filter/channel).
+
+    When pruning filters/channels, we count not just the parameters in the current layer,
+    but also the cascading parameter removal in subsequent layers:
+    - Filter pruning: removes filter params + corresponding input channels in next layer
+    - Channel pruning: removes channel params + corresponding output channels in previous layer
     """
+
+    #TODO: when getting the next of a linear, 
     # Get prunable layers (excluding final classification layer)
     conv_layers, linear_layers = _get_prunable_layers(model)
+    all_layers = conv_layers + linear_layers
+
+    def _get_next_layer_params(layer_idx, current_layer, pruned_dim):
+        """Calculate parameters removed in the next layer due to current layer pruning"""
+        if layer_idx >= len(all_layers) - 1:
+            return 0  # No next layer
+
+        next_name, next_layer = all_layers[layer_idx + 1]
+
+        if dim == 0:  # filter pruning - affects input channels of next layer
+            if isinstance(next_layer, nn.Conv2d):
+                # Each filter removed eliminates: 1 * kernel_h * kernel_w params per output filter
+                return (
+                    next_layer.weight.data.shape[0] * next_layer.weight.data.shape[2] * next_layer.weight.data.shape[3]
+                )
+            elif isinstance(next_layer, nn.Linear):
+                # Each filter removed eliminates params proportional to the spatial dimensions
+                # For the first linear layer after conv, this depends on the spatial size
+                return next_layer.weight.data.shape[0]  #* 25 - 5*5 spatial size assumption
+        else:  # channel pruning - affects output channels of previous layer
+            # This is more complex and typically handled differently in practice
+            # For now, we'll use the same logic as filter pruning
+            if isinstance(next_layer, nn.Conv2d):
+                return (
+                    next_layer.weight.data.shape[0] * next_layer.weight.data.shape[2] * next_layer.weight.data.shape[3]
+                )
+            elif isinstance(next_layer, nn.Linear):
+                return next_layer.weight.data.shape[0] * 25
+
+        return 0
 
     # Process Conv2d layers
-    for name, m in conv_layers:
+    for layer_idx, (name, m) in enumerate(conv_layers):
+        print(name)
         size = m.weight.data.shape[dim]
         conv[index : (index + size)] = computer_weight(m.weight, prune_way, dimension)
 
         # Calculate parameters per group for Conv2d
         weight_shape = m.weight.data.shape
         if dim == 0:  # filter pruning
-            # Each filter: in_channels * kernel_h * kernel_w
-            params_per_group = weight_shape[1] * weight_shape[2] * weight_shape[3]
+            # Parameters in current layer: in_channels * kernel_h * kernel_w
+            current_layer_params = weight_shape[1] * weight_shape[2] * weight_shape[3]
+            # Parameters in next layer that will be removed
+            next_layer_params = _get_next_layer_params(layer_idx, m, dim)
+            params_per_group = current_layer_params + next_layer_params
         else:  # channel pruning (dim == 1)
-            # Each channel: out_channels * kernel_h * kernel_w
-            params_per_group = weight_shape[0] * weight_shape[2] * weight_shape[3]
+            # Parameters in current layer: out_channels * kernel_h * kernel_w
+            current_layer_params = weight_shape[0] * weight_shape[2] * weight_shape[3]
+            # For channel pruning, we typically don't count next layer params as it's more complex
+            # The current layer channel affects all output filters
+            params_per_group = current_layer_params
 
         param_counts[index : (index + size)] = params_per_group
         index += size
 
     # Process Linear layers (excluding final layer)
     first_linear = True
-    for name, m in linear_layers:
+    for layer_idx, (name, m) in enumerate(linear_layers):
+        conv_layer_count = len(conv_layers)
+        actual_layer_idx = conv_layer_count + layer_idx
+
+        # NOTE: never used in experiment the channel pruning, so just refer to else branch
+        # it only works for fedml CNN_WEB, for other models you need to change it
         if dim == 1 and first_linear:
             first_linear = False
             # reshape as conv
@@ -189,7 +239,9 @@ def computer_conv_with_params(model, conv, param_counts, index, dim, dimension, 
             conv[index : (index + n_ch)] = computer_weight(m.weight, prune_way, dimension)
 
             # Parameters per channel in reshaped linear layer
-            params_per_group = m.out_features * 5 * 5
+            current_layer_params = m.out_features * 5 * 5
+            next_layer_params = _get_next_layer_params(actual_layer_idx, m, dim)
+            params_per_group = current_layer_params + next_layer_params
             param_counts[index : (index + n_ch)] = params_per_group
             index += n_ch
 
@@ -201,8 +253,11 @@ def computer_conv_with_params(model, conv, param_counts, index, dim, dimension, 
 
             # Calculate parameters per group for Linear layer
             if dim == 0:  # output features (filter-like pruning)
-                params_per_group = m.weight.data.shape[1]  # input features
+                current_layer_params = m.weight.data.shape[1]  # input features
+                next_layer_params = _get_next_layer_params(actual_layer_idx, m, dim)
+                params_per_group = current_layer_params + next_layer_params
             else:  # input features (channel-like pruning)
+                # For channel pruning in linear layers, we affect all output features
                 params_per_group = m.weight.data.shape[0]  # output features
 
             param_counts[index : (index + size)] = params_per_group
@@ -277,18 +332,19 @@ def computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way="me
         thre = y[thre_index]
 
     # Add debugging information
-    actual_param_removal = cumulative_percent[thre_index].item() if thre_index < len(cumulative_percent) else 1.0
-    # print(f"Total groups: {total_groups}")
-    # print(f"Total parameters: {total_params}")
-    # print(f"Target parameter removal: {percent:.2%}")
-    # print(f"Actual parameter removal: {actual_param_removal:.2%}")
-    # print(f"Groups to remove: {thre_index + 1}")
-    # print(f"Group removal percentage: {(thre_index + 1) / total_groups:.2%}")
-    # print(f"Min importance: {y[0]:.6f}")
-    # print(f"Max importance: {y[-1]:.6f}")
-    # print(f"Threshold value: {thre:.6f}")
+    actual_param_removal = cumulative_percent[int(thre_index)].item() if thre_index < len(cumulative_percent) else 1.0
+    print(f"Total groups: {total_groups}")
+    print(f"Total parameters: {total_params}")
+    print(f"Target parameter removal: {percent:.2%}")
+    print(f"Actual parameter removal: {actual_param_removal:.2%}")
+    print(f"len of cumulative: {len(cumulative_percent)} ")
+    print(f"Groups to remove: {thre_index + 1}")
+    print(f"Group removal percentage: {(thre_index + 1) / total_groups:.2%}")
+    print(f"Min importance: {y[0]:.6f}")
+    print(f"Max importance: {y[-1]:.6f}")
+    print(f"Threshold value: {thre:.6f}")
 
-    return total_groups, param_counts.sum(), thre
+    return total_groups, total_params, thre
 
 
 def create_conv2d(old_conv2d, in_channels, out_filters, old_groups=None):
