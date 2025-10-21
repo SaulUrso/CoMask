@@ -32,7 +32,8 @@ class HARBox_CNN(nn.Module):
         conv_output = torch.relu(self.conv1(x))
         conv_output = torch.relu(self.conv2(conv_output))
 
-        conv_output = conv_output.view(self.batch_size, int(32 * self.shrinkage_ratio) * 8 * 8)
+        # Dynamically calculate the flattened size instead of hardcoding it
+        conv_output = conv_output.view(self.batch_size, -1)
         output = self.linear(conv_output)
 
         return output

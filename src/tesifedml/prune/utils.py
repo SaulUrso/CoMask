@@ -5,29 +5,54 @@ from .keywords import KEY_CHANNEL, KEY_FILTER, KEY_FILTER_AND_CHANNEL
 
 
 def group_lasso_by_filter_or_channel(param_group, dimension):
-    return torch.sum(param_group**2, dim=dimension)
+    return torch.sqrt(torch.sum(param_group**2, dim=dimension))
+
+
+def _get_prunable_layers(model):
+    """
+    Get lists of prunable layers, excluding the final classification layer.
+    Returns (conv_layers, linear_layers) where linear_layers excludes the final layer.
+    """
+    conv_layers = []
+    linear_layers = []
+
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Conv2d):
+            conv_layers.append((name, module))
+        elif isinstance(module, nn.Linear):
+            linear_layers.append((name, module))
+
+    # Exclude the final linear layer (assumed to be the classification layer)
+    if linear_layers:
+        linear_layers = linear_layers[:-1]
+
+    return conv_layers, linear_layers
 
 
 def computer_total(model, dim):
-    # TODO: change to include fc layers, exclude classifier
     assert isinstance(model, nn.Module)
     total = 0
 
-    # Count the specified dimension lengths of all Conv
-    first_linear = True
+    # Get prunable layers (excluding final classification layer)
+    conv_layers, linear_layers = _get_prunable_layers(model)
 
-    for m in model.modules():
-        if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
-            # if doing channel wise, the first linear layer has to be considered
-            # as convolutional in order to be used
-            if dim == 1 and first_linear and isinstance(m, nn.Linear):
-                first_linear = False
-                n_cols = m.weight.data.shape[dim]
-                n_ch = n_cols / (5 * 5)  # TODO: change if filter dimension changes
-                assert n_ch == int(n_ch)
-                total += int(n_ch)
-            else:
-                total += m.weight.data.shape[dim]
+    # Count the specified dimension lengths of all Conv layers
+    for name, m in conv_layers:
+        total += m.weight.data.shape[dim]
+
+    # Count linear layers (excluding final layer)
+    first_linear = True
+    for name, m in linear_layers:
+        # if doing channel wise, the first linear layer has to be considered
+        # as convolutional in order to be used
+        if dim == 1 and first_linear:
+            first_linear = False
+            n_cols = m.weight.data.shape[dim]
+            n_ch = n_cols / (5 * 5)  # TODO: change if filter dimension changes
+            assert n_ch == int(n_ch)
+            total += int(n_ch)
+        else:
+            total += m.weight.data.shape[dim]
 
     return total
 
@@ -95,83 +120,175 @@ def computer_weight(weight, prune_way, dimension):
 
 
 def computer_conv(model, conv, index, dim, dimension, dimension_fc, prune_way):
+    # Get prunable layers (excluding final classification layer)
+    conv_layers, linear_layers = _get_prunable_layers(model)
+
+    # Process Conv2d layers
+    for name, m in conv_layers:
+        size = m.weight.data.shape[dim]
+        conv[index : (index + size)] = computer_weight(m.weight, prune_way, dimension)
+        index += size
+
+    # Process Linear layers (excluding final layer)
     first_linear = True
-    for m in model.modules():
-        if isinstance(m, nn.Conv2d):
+    for name, m in linear_layers:
+        if dim == 1 and first_linear:
+            first_linear = False
+            # reshape as conv
+            n_ch = m.weight.data.shape[dim] // (5 * 5)  # TODO: change filter size
+            original_weights = m.weight.data.clone()
+            m.weight.data = m.weight.data.view(m.out_features, n_ch, 5, 5)
+
+            conv[index : (index + n_ch)] = computer_weight(m.weight, prune_way, dimension)
+            index += n_ch
+
+            m.weight.data = original_weights
+
+        else:
             size = m.weight.data.shape[dim]
-            conv[index : (index + size)] = computer_weight(m.weight, prune_way, dimension)
+            conv[index : (index + size)] = computer_weight(m.weight, prune_way, dimension_fc)
             index += size
-
-        if isinstance(m, nn.Linear):
-            if dim == 1 and first_linear:
-                first_linear = False
-                # reshape as conv
-                n_ch = m.weight.data.shape[dim] // (5 * 5)  # TODO: change filter size
-                original_weights = m.weight.data.clone()
-                m.weight.data = m.weight.data.view(m.out_features, n_ch, 5, 5)
-
-                conv[index : (index + n_ch)] = computer_weight(m.weight, prune_way, dimension)
-                index += n_ch
-
-                m.weight.data = original_weights
-
-            else:
-                size = m.weight.data.shape[dim]
-                conv[index : (index + size)] = computer_weight(m.weight, prune_way, dimension_fc)
-                index += size
 
     return conv, index
 
 
+def computer_conv_with_params(model, conv, param_counts, index, dim, dimension, dimension_fc, prune_way):
+    """
+    Computer importance scores and parameter counts for each group (filter/channel)
+    """
+    # Get prunable layers (excluding final classification layer)
+    conv_layers, linear_layers = _get_prunable_layers(model)
+
+    # Process Conv2d layers
+    for name, m in conv_layers:
+        size = m.weight.data.shape[dim]
+        conv[index : (index + size)] = computer_weight(m.weight, prune_way, dimension)
+
+        # Calculate parameters per group for Conv2d
+        weight_shape = m.weight.data.shape
+        if dim == 0:  # filter pruning
+            # Each filter: in_channels * kernel_h * kernel_w
+            params_per_group = weight_shape[1] * weight_shape[2] * weight_shape[3]
+        else:  # channel pruning (dim == 1)
+            # Each channel: out_channels * kernel_h * kernel_w
+            params_per_group = weight_shape[0] * weight_shape[2] * weight_shape[3]
+
+        param_counts[index : (index + size)] = params_per_group
+        index += size
+
+    # Process Linear layers (excluding final layer)
+    first_linear = True
+    for name, m in linear_layers:
+        if dim == 1 and first_linear:
+            first_linear = False
+            # reshape as conv
+            n_ch = m.weight.data.shape[dim] // (5 * 5)  # TODO: change filter size
+            original_weights = m.weight.data.clone()
+            m.weight.data = m.weight.data.view(m.out_features, n_ch, 5, 5)
+
+            conv[index : (index + n_ch)] = computer_weight(m.weight, prune_way, dimension)
+
+            # Parameters per channel in reshaped linear layer
+            params_per_group = m.out_features * 5 * 5
+            param_counts[index : (index + n_ch)] = params_per_group
+            index += n_ch
+
+            m.weight.data = original_weights
+
+        else:
+            size = m.weight.data.shape[dim]
+            conv[index : (index + size)] = computer_weight(m.weight, prune_way, dimension_fc)
+
+            # Calculate parameters per group for Linear layer
+            if dim == 0:  # output features (filter-like pruning)
+                params_per_group = m.weight.data.shape[1]  # input features
+            else:  # input features (channel-like pruning)
+                params_per_group = m.weight.data.shape[0]  # output features
+
+            param_counts[index : (index + size)] = params_per_group
+            index += size
+
+    return conv, param_counts, index
+
+
 def computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way="mean_abs"):
     """
-    Calculate pruning threshold of Conv layer
+    Calculate pruning threshold of Conv layer based on parameter percentage removal.
+    Excludes the final classification layer from pruning calculations.
     """
-    total = 0
+    total_groups = 0
 
     if prune_type in [KEY_FILTER, KEY_CHANNEL]:
         dim = 0 if prune_type == KEY_FILTER else 1
         dimension = (1, 2, 3) if prune_type == KEY_FILTER else (0, 2, 3)
         dimension_fc = 1 if prune_type == KEY_FILTER else 0
 
-        # NOTE: it also considers the units of the output layer
-        # done this way because when doing channel pruning they consider the channels
-        # of the input layer (which are never pruned)
-        total = computer_total(model, dim)
+        # NOTE: Excludes the final classification layer from consideration
+        total_groups = computer_total(model, dim)
 
-        conv = torch.zeros(total)
+        conv = torch.zeros(total_groups)
+        param_counts = torch.zeros(total_groups)  # Store parameter count per group
         index = 0
-        conv, index = computer_conv(model, conv, index, dim, dimension, dimension_fc, prune_way)
+        conv, param_counts, index = computer_conv_with_params(
+            model, conv, param_counts, index, dim, dimension, dimension_fc, prune_way
+        )
 
     elif prune_type == KEY_FILTER_AND_CHANNEL:
-        # filter_wise
-        total += computer_total(model, 0)
-        # channel_wise
-        total += computer_total(model, 1)
+        # filter_wise (excluding final layer)
+        total_groups += computer_total(model, 0)
+        # channel_wise (excluding final layer)
+        total_groups += computer_total(model, 1)
 
-        conv = torch.zeros(total)
+        conv = torch.zeros(total_groups)
+        param_counts = torch.zeros(total_groups)
         index = 0
         # filter_wise
-        conv, index = computer_conv(model, conv, index, 0, (1, 2, 3), 1, prune_way)
+        conv, param_counts, index = computer_conv_with_params(
+            model, conv, param_counts, index, 0, (1, 2, 3), 1, prune_way
+        )
         # channel_wise
-        conv, index = computer_conv(model, conv, index, 1, (0, 2, 3), 0, prune_way)
+        conv, param_counts, index = computer_conv_with_params(
+            model, conv, param_counts, index, 1, (0, 2, 3), 0, prune_way
+        )
     else:
         raise ValueError(f"{prune_type} does not supports")
 
+    # Sort by importance scores (ascending order - least important first)
     y, i = torch.sort(conv)
-    thre_index = int(total * percent)
-    thre = y[thre_index]
+
+    # Get corresponding parameter counts in the same order
+    sorted_param_counts = param_counts[i]
+
+    # Calculate cumulative parameter removal
+    cumulative_params = torch.cumsum(sorted_param_counts, dim=0)
+    total_params = torch.sum(param_counts)
+    cumulative_percent = cumulative_params / total_params
+
+    # Find threshold where cumulative percentage reaches target
+    target_param_removal = percent
+    threshold_indices = torch.where(cumulative_percent >= target_param_removal)[0]
+
+    if len(threshold_indices) == 0:
+        # If target percentage cannot be reached, use all groups
+        thre_index = total_groups - 1
+        thre = y[-1]
+    else:
+        thre_index = threshold_indices[0].item()
+        thre = y[thre_index]
 
     # Add debugging information
-    print(f"Total elements: {total}")
-    print(f"Percent: {percent}")
-    print(f"Threshold index: {thre_index}")
-    print(f"Min value: {y[0]:.6f}")
-    print(f"Max value: {y[-1]:.6f}")
-    print(f"Threshold value: {thre:.6f}")
-    print(f"Values around threshold: {y[max(0, thre_index - 2) : thre_index + 3]}")
+    actual_param_removal = cumulative_percent[thre_index].item() if thre_index < len(cumulative_percent) else 1.0
+    # print(f"Total groups: {total_groups}")
+    # print(f"Total parameters: {total_params}")
+    # print(f"Target parameter removal: {percent:.2%}")
+    # print(f"Actual parameter removal: {actual_param_removal:.2%}")
+    # print(f"Groups to remove: {thre_index + 1}")
+    # print(f"Group removal percentage: {(thre_index + 1) / total_groups:.2%}")
+    # print(f"Min importance: {y[0]:.6f}")
+    # print(f"Max importance: {y[-1]:.6f}")
+    # print(f"Threshold value: {thre:.6f}")
 
-    return total, thre
+    return total_groups, param_counts.sum(), thre
 
 
 def create_conv2d(old_conv2d, in_channels, out_filters, old_groups=None):
@@ -198,6 +315,15 @@ def create_conv2d(old_conv2d, in_channels, out_filters, old_groups=None):
     return new_conv2d
 
 
+def create_batchnorm2d(old_batchnorm2d, in_channels):
+    assert isinstance(old_batchnorm2d, nn.BatchNorm2d), f"Got {type(old_batchnorm2d)}"
+
+    eps = old_batchnorm2d.eps
+    momentum = old_batchnorm2d.momentum
+
+    return nn.BatchNorm2d(in_channels, eps=eps, momentum=momentum)
+
+
 def create_linear(old_linear, in_channels, out_channels=None):
     assert isinstance(old_linear, nn.Linear)
 
@@ -222,3 +348,8 @@ def set_module_list(model, name_list, module_list, new_module_list):
     for name, module, new_module in zip(name_list, module_list, new_module_list):
         # print(name, module, new_module)
         _set_module(model, name, new_module)
+
+
+def count_parameters(model):
+    """Count total number of parameters in a model"""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
