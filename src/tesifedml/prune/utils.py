@@ -266,7 +266,7 @@ def computer_conv_with_params(model, conv, param_counts, index, dim, dimension, 
     return conv, param_counts, index
 
 
-def computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way="mean_abs"):
+def computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way="mean_abs", ceil=False):
     """
     Calculate pruning threshold of Conv layer based on parameter percentage removal.
     Excludes the final classification layer from pruning calculations.
@@ -282,11 +282,8 @@ def computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way="me
         total_groups = computer_total(model, dim)
 
         conv = torch.zeros(total_groups)
-        param_counts = torch.zeros(total_groups)  # Store parameter count per group
         index = 0
-        conv, param_counts, index = computer_conv_with_params(
-            model, conv, param_counts, index, dim, dimension, dimension_fc, prune_way
-        )
+        conv, index = computer_conv(model, conv, index, dim, dimension, dimension_fc, prune_way)
 
     elif prune_type == KEY_FILTER_AND_CHANNEL:
         # filter_wise (excluding final layer)
@@ -295,56 +292,27 @@ def computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way="me
         total_groups += computer_total(model, 1)
 
         conv = torch.zeros(total_groups)
-        param_counts = torch.zeros(total_groups)
         index = 0
         # filter_wise
-        conv, param_counts, index = computer_conv_with_params(
-            model, conv, param_counts, index, 0, (1, 2, 3), 1, prune_way
-        )
+        conv, index = computer_conv(model, conv, index, 0, (1, 2, 3), 1, prune_way)
         # channel_wise
-        conv, param_counts, index = computer_conv_with_params(
-            model, conv, param_counts, index, 1, (0, 2, 3), 0, prune_way
-        )
+        conv, index = computer_conv(model, conv, index, 1, (0, 2, 3), 0, prune_way)
     else:
         raise ValueError(f"{prune_type} does not supports")
 
-    # Sort by importance scores (ascending order - least important first)
     y, i = torch.sort(conv)
+    thre_index = int(total_groups * percent)
+    thre = y[thre_index + (1 if ceil else 0)]
 
-    # Get corresponding parameter counts in the same order
-    sorted_param_counts = param_counts[i]
-
-    # Calculate cumulative parameter removal
-    cumulative_params = torch.cumsum(sorted_param_counts, dim=0)
-    total_params = torch.sum(param_counts)
-    cumulative_percent = cumulative_params / total_params
-
-    # Find threshold where cumulative percentage reaches target
-    target_param_removal = percent
-    threshold_indices = torch.where(cumulative_percent >= target_param_removal)[0]
-
-    if len(threshold_indices) == 0:
-        # If target percentage cannot be reached, use all groups
-        thre_index = total_groups - 1
-        thre = y[-1]
-    else:
-        thre_index = threshold_indices[0].item()
-        thre = y[thre_index]
-
-    # Add debugging information
-    actual_param_removal = cumulative_percent[int(thre_index)].item() if thre_index < len(cumulative_percent) else 1.0
     print(f"Total groups: {total_groups}")
-    print(f"Total parameters: {total_params}")
     print(f"Target parameter removal: {percent:.2%}")
-    print(f"Actual parameter removal: {actual_param_removal:.2%}")
-    print(f"len of cumulative: {len(cumulative_percent)} ")
     print(f"Groups to remove: {thre_index + 1}")
     print(f"Group removal percentage: {(thre_index + 1) / total_groups:.2%}")
     print(f"Min importance: {y[0]:.6f}")
     print(f"Max importance: {y[-1]:.6f}")
     print(f"Threshold value: {thre:.6f}")
 
-    return total_groups, total_params, thre
+    return total_groups, thre
 
 
 def create_conv2d(old_conv2d, in_channels, out_filters, old_groups=None):

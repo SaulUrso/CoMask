@@ -329,15 +329,17 @@ def prune_classifier(model, in_channels, in_idx):
 def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, with_mask=None):
     """Main function to prune MobileNet"""
     # Calculate threshold (only if not using provided mask)
+    total_groups = None
+    group_pruning_ratio = None
+
     if with_mask is None:
-        _, total_params_before, threshold = computer_conv_threshold(
-            model, percent, prune_type=KEY_FILTER, prune_way=prune_way
-        )
+        total_groups, threshold = computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way=prune_way)
     else:
         # When using provided mask, threshold is not used
-        # Calculate original parameters for comparison
-        total_params_before = count_parameters(model)
         threshold = None
+
+    # Calculate original parameters for comparison
+    total_params_before = count_parameters(model)
 
     # Prune features
     model, final_channels, final_idx, masks = prune_features(
@@ -349,10 +351,10 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, w
 
     # Calculate final statistics
     if with_mask is None:
-        _, total_params_after, _ = computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way=prune_way)
-    else:
-        total_params_after = count_parameters(model)
+        new_total_groups, _ = computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way=prune_way)
+        group_pruning_ratio = (total_groups - new_total_groups) / total_groups
 
+    total_params_after = count_parameters(model)
     param_pruning_ratio = (total_params_before - total_params_after) / total_params_before
 
-    return model, param_pruning_ratio, threshold, masks
+    return model, param_pruning_ratio, group_pruning_ratio, threshold, masks

@@ -6,6 +6,7 @@ from .keywords import KEY_FILTER
 from .utils import (
     computer_conv_threshold,
     computer_weight,
+    count_parameters,
     create_batchnorm2d,
     create_conv2d,
     create_linear,
@@ -238,17 +239,13 @@ def prune_classifier(module_list, in_channels, in_idx):
 
 def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, with_mask=None):
     # Calculate threshold (only if not using provided mask)
+    total_groups = None
     if with_mask is None:
-        total, total_params_before, threshold = computer_conv_threshold(
-            model, percent, prune_type=KEY_FILTER, prune_way=prune_way
-        )
+        total_groups, threshold = computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way=prune_way)
     else:
-        # When using provided mask, threshold is not used
-        # Calculate original parameters for comparison
-        from tesifedml.prune.utils import count_parameters
-
-        total_params_before = count_parameters(model)
         threshold = None
+
+    total_params_before = count_parameters(model)
 
     feature_name_list = list()
     feature_module_list = list()
@@ -296,16 +293,15 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, w
     set_module_list(model, classifier_name_list, classifier_module_list, new_module_list)
 
     # Calculate final statistics
+    group_pruning_ratio = None
     if with_mask is None:
-        new_total, total_params_after, _ = computer_conv_threshold(
-            model, percent, prune_type=KEY_FILTER, prune_way=prune_way
-        )
-    else:
-        from tesifedml.prune.utils import count_parameters
+        new_total_groups, _ = computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way=prune_way)
 
-        total_params_after = count_parameters(model)
+        group_pruning_ratio = (total_groups - new_total_groups) / total_groups
+
+    total_params_after = count_parameters(model)
 
     # Calculate parameter-based pruning ratio
     param_pruning_ratio = (total_params_before - total_params_after) / total_params_before
 
-    return model, param_pruning_ratio, threshold, masks
+    return model, param_pruning_ratio, group_pruning_ratio, threshold, masks

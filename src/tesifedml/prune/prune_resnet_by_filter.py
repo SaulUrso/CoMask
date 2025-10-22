@@ -95,12 +95,11 @@ def prune_conv(
     new_batchnorm2d.running_var = old_batchnorm2d.running_var[out_idx.tolist()].clone()
 
     named_mask = {
-        "mask" : mask, 
+        "mask": mask,
         "layer_type": "conv",
         "original_filters": old_conv2d.out_channels,
         "pruned_filters": out_filters,
         "indices_kept": out_idx,
-
     }
 
     return new_conv2d, new_batchnorm2d, out_filters, out_idx, named_mask
@@ -202,8 +201,6 @@ def prune_basic_block(
     new_block.bn2 = new_bn2
     new_block.relu = nn.ReLU(inplace=True)
 
-
-
     return new_block, out_channels_2, out_idx_2, block_masks
 
 
@@ -292,17 +289,21 @@ def prune_resnet_classifier(model, in_channels, in_idx):
 def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, with_mask=None):
     """Main function to prune ResNet model"""
     # Calculate threshold (only if not using provided mask)
+    total_groups = None
+    group_pruning_ratio = None
+
     if with_mask is None:
-        total, total_params_before, threshold = computer_conv_threshold(
-            model, percent, prune_type=KEY_FILTER, prune_way=prune_way
+        total_groups, threshold = computer_conv_threshold(
+            model, percent, prune_type=KEY_FILTER, prune_way=prune_way, ceil=True
         )
     else:
         # When using provided mask, threshold is not used
-        # Calculate original parameters for comparison
-        from tesifedml.prune.utils import count_parameters
-
-        total_params_before = count_parameters(model)
         threshold = None
+
+    # Calculate original parameters for comparison
+    from tesifedml.prune.utils import count_parameters
+
+    total_params_before = count_parameters(model)
 
     # Prune features
     model, final_channels, final_idx, masks = prune_resnet_features(
@@ -314,14 +315,10 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, w
 
     # Calculate final statistics
     if with_mask is None:
-        new_total, total_params_after, _ = computer_conv_threshold(
-            model, percent, prune_type=KEY_FILTER, prune_way=prune_way
-        )
-    else:
-        from tesifedml.prune.utils import count_parameters
+        new_total_groups, _ = computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way=prune_way)
+        group_pruning_ratio = (total_groups - new_total_groups) / total_groups
 
-        total_params_after = count_parameters(model)
-
+    total_params_after = count_parameters(model)
     param_pruning_ratio = (total_params_before - total_params_after) / total_params_before
 
-    return model, param_pruning_ratio, threshold, masks
+    return model, param_pruning_ratio, group_pruning_ratio, threshold, masks
