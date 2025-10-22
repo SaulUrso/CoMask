@@ -3,13 +3,14 @@ from typing import Any, Dict, List
 import torch
 
 
-def vote_mask(masks_list: List[Dict[str, Any]], percentage: float) -> Dict[str, Any]:
+def vote_mask(masks_list: List[Dict[str, Any]], percentage: float, min_filters: int = 1) -> Dict[str, Any]:
     """
     Calculate votes for each unit/group across multiple masks and create consolidated mask.
 
     Args:
         masks_list: List of mask dictionaries from prune() functions (mobilenet, resnet, cnn)
         percentage: Percentage of least voted units to remove (0.0 to 1.0)
+        min_filters: Minimum number of filters that must remain in each layer (default: 1)
 
     Returns:
         dict: Consolidated mask dictionary with same structure as input masks
@@ -27,6 +28,9 @@ def vote_mask(masks_list: List[Dict[str, Any]], percentage: float) -> Dict[str, 
     if not (0.0 <= percentage <= 1.0):
         raise ValueError("percentage must be between 0.0 and 1.0")
 
+    if min_filters < 1:
+        raise ValueError("min_filters must be at least 1")
+
     # Get all unique layer names across all masks
     all_layer_names = set()
     for mask_dict in masks_list:
@@ -37,7 +41,7 @@ def vote_mask(masks_list: List[Dict[str, Any]], percentage: float) -> Dict[str, 
     layer_info = {}
 
     # Calculate votes for each unit in each layer
-    for layer_name in all_layer_names:
+    for layer_name in sorted(list(all_layer_names)):
         # Find the original size by looking at the first mask that has this layer
         original_size = None
         layer_type = None
@@ -48,31 +52,25 @@ def vote_mask(masks_list: List[Dict[str, Any]], percentage: float) -> Dict[str, 
                 layer_type = mask_dict[layer_name]["layer_type"]
                 break
 
-        if original_size is None:
-            continue
+        assert original_size is not None
 
         # Initialize vote count for this layer
         votes = torch.zeros(original_size, dtype=torch.float32)
 
         # Count votes from each mask
         for mask_dict in masks_list:
-            if layer_name in mask_dict:
-                mask_tensor = mask_dict[layer_name]["mask"]
-                # Ensure the mask has the correct size (should match original_size)
-                if len(mask_tensor) == original_size:
-                    votes += mask_tensor
-                else:
-                    # This shouldn't happen if masks are consistent, but handle gracefully
-                    print(
-                        f"Warning: mask size mismatch for layer {layer_name}. Expected {original_size}, got {len(mask_tensor)}"
-                    )
+            assert layer_name in mask_dict
+            mask_tensor = mask_dict[layer_name]["mask"]
+            # Ensure the mask has the correct size (should match original_size)
+            assert len(mask_tensor) == original_size
+            votes += mask_tensor
 
         layer_votes[layer_name] = votes
         layer_info[layer_name] = {"original_size": original_size, "layer_type": layer_type}
 
     # Collect all votes across all layers for global ranking
     all_votes = []
-    vote_locations: List[tuple[str, int]] = []  # (layer_name, unit_index) for each vote
+    vote_locations = []  # (layer_name, unit_index) for each vote
 
     for layer_name, votes in layer_votes.items():
         for unit_idx, vote_count in enumerate(votes):
@@ -87,20 +85,32 @@ def vote_mask(masks_list: List[Dict[str, Any]], percentage: float) -> Dict[str, 
     total_units = len(all_votes)
     units_to_remove = int(total_units * percentage)
 
-    # Determine which units to remove globally
+    # needed to see how many units we are removing, to not remove all of them
     units_to_remove_set = set()
-    for i in range(min(units_to_remove, len(sorted_indices))):
-        original_idx = sorted_indices[i].item()
+    layer_removal_counts = {layer_name: 0 for layer_name in all_layer_names}
+    removed_count = 0
+    candidate_idx = 0
+
+    while removed_count < units_to_remove and candidate_idx < len(sorted_indices):
+        original_idx = int(sorted_indices[candidate_idx].item())
         layer_name, unit_idx = vote_locations[original_idx]
-        units_to_remove_set.add((layer_name, unit_idx))
+
+        # Check if removing this unit would violate min_filters constraint
+        original_size = layer_info[layer_name]["original_size"]
+        current_removals = layer_removal_counts[layer_name]
+
+        # If removing this unit would leave at least min_filters, remove it
+        if (original_size - current_removals - 1) >= min_filters:
+            units_to_remove_set.add((layer_name, unit_idx))
+            layer_removal_counts[layer_name] += 1
+            removed_count += 1
+
+        candidate_idx += 1
 
     # Create consolidated masks
     consolidated_masks = {}
 
     for layer_name in all_layer_names:
-        if layer_name not in layer_info:
-            continue
-
         original_size = layer_info[layer_name]["original_size"]
         layer_type = layer_info[layer_name]["layer_type"]
 

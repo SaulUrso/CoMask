@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -455,3 +456,83 @@ def combine_mask(mask_1, mask_2):
             combined_masks[layer_name] = mask_2_info.copy()
 
     return combined_masks
+
+
+def shuffle_mask(names_mask, seed):
+    """
+    Shuffle the positions of ones in each layer's mask while keeping the same number of filters.
+
+    This function takes a mask dictionary and randomly redistributes the positions of kept filters
+    (ones) in each layer's mask. The total number of kept filters per layer remains the same,
+    but their positions are randomly shuffled.
+
+    Args:
+        names_mask (dict): Dictionary containing mask information for each layer.
+                          Each entry should have structure:
+                          {
+                              "mask": torch.Tensor,  # Boolean mask tensor
+                              "layer_type": str,     # Type of layer
+                              "original_filters": int,  # Original number of filters
+                              "pruned_filters": int,    # Number of kept filters
+                              "indices_kept": np.ndarray  # Indices of kept filters
+                          }
+        seed (int, optional): Random seed for reproducible shuffling. If None,
+                             uses numpy's global random state.
+
+    Returns:
+        dict: New mask dictionary with shuffled positions but same structure
+
+    Example:
+        >>> mask_dict = {
+        ...     "conv1": {
+        ...         "mask": torch.tensor([1., 0., 1., 0., 1.]),
+        ...         "layer_type": "conv",
+        ...         "original_filters": 5,
+        ...         "pruned_filters": 3,
+        ...         "indices_kept": np.array([0, 2, 4])
+        ...     }
+        ... }
+        >>> shuffled = shuffle_mask(mask_dict, seed=42)
+        >>> # shuffled["conv1"]["mask"] might be: torch.tensor([0., 1., 0., 1., 1.])
+        >>> # shuffled["conv1"]["indices_kept"] might be: np.array([1, 3, 4])
+    """
+    # Create random number generator with seed
+    rng = np.random.default_rng(seed)
+
+    shuffled_masks = {}
+
+    for layer_name, mask_info in names_mask.items():
+        # Get the original mask
+        original_mask = mask_info["mask"].cpu()
+
+        # Get total number of positions and number of ones
+        total_positions = len(original_mask)
+        num_ones = int(torch.sum(original_mask).item())
+
+        # Create new shuffled mask with same number of ones
+        new_mask = torch.zeros_like(original_mask)
+
+        # Randomly select positions for the ones using the seeded generator
+        all_positions = np.arange(total_positions)
+        shuffled_positions = rng.choice(all_positions, size=num_ones, replace=False)
+        shuffled_positions = np.sort(shuffled_positions)  # Sort for consistency
+
+        # Set the selected positions to 1
+        new_mask[torch.from_numpy(shuffled_positions)] = 1.0
+
+        # Create new mask info with updated fields
+        shuffled_masks[layer_name] = {
+            "mask": new_mask,
+            "layer_type": mask_info["layer_type"],
+            "original_filters": mask_info["original_filters"],
+            "pruned_filters": mask_info["pruned_filters"],  # This should remain the same
+            "indices_kept": shuffled_positions,
+        }
+
+        # Verify that the number of kept filters is the same
+        assert num_ones == mask_info["pruned_filters"] == len(shuffled_positions) == int(torch.sum(new_mask).item()), (
+            f"Mismatch in pruned_filters for layer {layer_name}: "
+            f"expected {mask_info['pruned_filters']}, got {len(shuffled_positions)}"
+        )
+
+    return shuffled_masks

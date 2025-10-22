@@ -140,6 +140,7 @@ class FedMLAdapter:
         batch_size: int = 32,
         num_workers: int = 0,
         log_distributions: bool = True,
+        validation_split: Optional[float] = None,
     ) -> Tuple:
         """
         Create FedML's expected data structure.
@@ -153,11 +154,17 @@ class FedMLAdapter:
             batch_size: Batch size for dataloaders
             num_workers: Number of workers for dataloaders
             log_distributions: Whether to log label distributions to wandb
+            validation_split: Optional portion of training data to use as validation (0.0-1.0)
 
         Returns:
             Tuple of (train_data_num, test_data_num, train_data_global,
                      test_data_global, train_data_local_num_dict,
+                     train_data_local_dict, test_data_local_dict, class_num,
+                     val_data_local_dict) when validation_split is provided, or
+            Tuple of (train_data_num, test_data_num, train_data_global,
+                     test_data_global, train_data_local_num_dict,
                      train_data_local_dict, test_data_local_dict, class_num)
+                     when validation_split is None
         """
         # Number of classes
         class_num = len(np.unique(train_dataset["label"]))
@@ -191,21 +198,62 @@ class FedMLAdapter:
         train_data_local_num_dict = {}
         train_data_local_dict = {}
         test_data_local_dict = {}
+        val_data_local_dict = {}
 
         null_count = 0
         null_idexes = []
 
         for client_id, client_train_dataset in enumerate(train_partitions):
-            # Set transform on the client training dataset
-            client_train_dataset = client_train_dataset.with_transform(transform_fn)
-
-            train_data_local_num_dict[client_id] = len(client_train_dataset)
-            train_data_local_dict[client_id] = DataLoader(
-                client_train_dataset,  # type: ignore
-                batch_size=batch_size,
-                shuffle=True,
-                collate_fn=collate_fn,
-            )
+            # Handle train/validation split if requested
+            if validation_split is not None:
+                client_train_dataset = client_train_dataset.shuffle(seed=client_id)
+                dataset_size = len(client_train_dataset)
+                val_size = int(dataset_size * validation_split)
+                train_size = dataset_size - val_size
+                
+                # Split the dataset indices
+                indices = list(range(dataset_size))
+                train_indices = indices[:train_size]
+                val_indices = indices[train_size:]
+                
+                # Create train and validation subsets
+                client_train_split = client_train_dataset.select(train_indices)
+                client_val_split = client_train_dataset.select(val_indices)
+                
+                # Set transforms
+                client_train_split = client_train_split.with_transform(transform_fn)
+                client_val_split = client_val_split.with_transform(transform_fn)
+                
+                # Store the actual training size after split
+                train_data_local_num_dict[client_id] = len(client_train_split)
+                
+                # Create training dataloader
+                train_data_local_dict[client_id] = DataLoader(
+                    client_train_split,  # type: ignore
+                    batch_size=batch_size,
+                    shuffle=True,
+                    collate_fn=collate_fn,
+                )
+                
+                # Create validation dataloader
+                val_data_local_dict[client_id] = DataLoader(
+                    client_val_split,  # type: ignore
+                    batch_size=batch_size,
+                    shuffle=False,
+                    collate_fn=collate_fn,
+                )
+            else:
+                # No validation split - use entire dataset for training
+                client_train_dataset = client_train_dataset.with_transform(transform_fn)
+                train_data_local_num_dict[client_id] = len(client_train_dataset)
+                train_data_local_dict[client_id] = DataLoader(
+                    client_train_dataset,  # type: ignore
+                    batch_size=batch_size,
+                    shuffle=True,
+                    collate_fn=collate_fn,
+                )
+                # No validation data when validation_split is None
+                val_data_local_dict[client_id] = None
 
             # Create local test dataset for this client
             if test_partitions is not None and test_partitions[client_id] is not None:
@@ -233,8 +281,14 @@ class FedMLAdapter:
                 cid: combine_batches(train_data_local_dict[cid]) for cid in train_data_local_dict.keys()
             }
             test_data_local_dict = {
-                cid: combine_batches(test_data_local_dict[cid]) for cid in test_data_local_dict.keys()
+                cid: combine_batches(test_data_local_dict[cid]) if test_data_local_dict[cid] is not None else None
+                for cid in test_data_local_dict.keys()
             }
+            if validation_split is not None:
+                val_data_local_dict = {
+                    cid: combine_batches(val_data_local_dict[cid]) if val_data_local_dict[cid] is not None else None
+                    for cid in val_data_local_dict.keys()
+                }
 
             # assert_one_batch(train_data_global, "train_data_global")
             # assert_one_batch(test_data_global, "test_data_global")
@@ -242,6 +296,9 @@ class FedMLAdapter:
                 assert_one_batch(loader, f"train_data_local_dict[{cid}]")
             for cid, loader in test_data_local_dict.items():
                 assert_one_batch(loader, f"test_data_local_dict[{cid}]")
+            if validation_split is not None:
+                for cid, loader in val_data_local_dict.items():
+                    assert_one_batch(loader, f"val_data_local_dict[{cid}]")
 
         # Log label distributions if requested
         if log_distributions:
@@ -249,19 +306,33 @@ class FedMLAdapter:
             if test_partitions is not None:
                 FedMLAdapter.log_label_distribution(test_partitions, test_dataset, "test")
 
-        return (
-            len(train_dataset),  # train_data_num
-            len(test_dataset),  # test_data_num
-            train_data_global,  # train_data_global
-            test_data_global,  # test_data_global
-            train_data_local_num_dict,  # train_data_local_num_dict
-            train_data_local_dict,  # train_data_local_dict
-            test_data_local_dict,  # test_data_local_dict
-            class_num,  # class_num
-        )
+        # Return tuple with validation data if validation split was requested
+        if validation_split is not None:
+            return (
+                len(train_dataset),  # train_data_num
+                len(test_dataset),  # test_data_num
+                train_data_global,  # train_data_global
+                test_data_global,  # test_data_global
+                train_data_local_num_dict,  # train_data_local_num_dict
+                train_data_local_dict,  # train_data_local_dict
+                test_data_local_dict,  # test_data_local_dict
+                class_num,  # class_num
+                val_data_local_dict,  # val_data_local_dict
+            )
+        else:
+            return (
+                len(train_dataset),  # train_data_num
+                len(test_dataset),  # test_data_num
+                train_data_global,  # train_data_global
+                test_data_global,  # test_data_global
+                train_data_local_num_dict,  # train_data_local_num_dict
+                train_data_local_dict,  # train_data_local_dict
+                test_data_local_dict,  # test_data_local_dict
+                class_num,  # class_num
+            )
 
 
 def assert_one_batch(dataloader, name):
-    if dataloader is None and "test_data_local" in name:
+    if dataloader is None and ("test_data_local" in name or "val_data_local" in name):
         return
     assert len(dataloader) == 1, f"{name} does not have exactly one batch (found {len(dataloader)})"
