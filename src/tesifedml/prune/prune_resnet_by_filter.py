@@ -1,4 +1,5 @@
 from typing import Any
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -23,41 +24,52 @@ def prune_conv(
     in_idx=None,
     minimum_channels=1,
     divisor=1,
+    layer_mask=None,
 ):
-    weight_copy = computer_weight(old_conv2d.weight, prune_way, (1, 2, 3))
-
-    if (
-        len(weight_copy) <= minimum_channels
-    ):  # NOTE: present in original code, specifies min number of filter in a layer
-        # just specify the indices of the filters maintained, which is the same as no pruning hapened
-        out_idx = np.arange(minimum_channels)
-        mask = torch.ones(len(weight_copy))
-
+    if layer_mask is not None:
+        # Use provided mask
+        mask = layer_mask["mask"]
+        out_idx = np.array(layer_mask["indices_kept"])
+        if len(out_idx.shape) == 0:  # Handle single index case
+            out_idx = np.array([out_idx])
     else:
-        mask = weight_copy.gt(conv_threshold).float()
+        # Calculate mask based on threshold
+        weight_copy = computer_weight(old_conv2d.weight, prune_way, (1, 2, 3))
 
-        # this just creates an array of the indices of ones in the mask
-        # the squeeze is used to make a flat array
-        out_idx: np.ndarray[Any, np.dtype[np.signedinteger[Any]]] = np.squeeze(np.argwhere(np.asarray(mask.cpu().numpy())))
-        if out_idx.size == 1:
-            out_idx = np.resize(out_idx, (1,))
+        if (
+            len(weight_copy) <= minimum_channels
+        ):  # NOTE: present in original code, specifies min number of filter in a layer
+            # just specify the indices of the filters maintained, which is the same as no pruning hapened
+            out_idx = np.arange(minimum_channels)
+            mask = torch.ones(len(weight_copy))
 
-        # NOTE: in the original code, they also round the number of filters kept.
-        # I kept it here, if you have divisor == 1 (we do) it doesn't do anything
-        old_prune_len = len(out_idx)
-        new_prune_len = round_to_multiple_of(old_prune_len, divisor)
+        else:
+            mask = weight_copy.gt(conv_threshold).float()
 
-        if new_prune_len > old_prune_len:  # this is skipped if divisor == 1
-            temp_mask = weight_copy.le(conv_threshold).float()
-            tmp_idx = np.squeeze(np.argwhere(np.asarray(temp_mask.cpu().numpy())))
-            if tmp_idx.size == 1:
-                tmp_idx = np.resize(tmp_idx, (1,))
-            res_idx = np.random.choice(tmp_idx, new_prune_len - old_prune_len, replace=False)
+            # this just creates an array of the indices of ones in the mask
+            # the squeeze is used to make a flat array
+            out_idx: np.ndarray[Any, np.dtype[np.signedinteger[Any]]] = np.squeeze(
+                np.argwhere(np.asarray(mask.cpu().numpy()))
+            )
+            if out_idx.size == 1:
+                out_idx = np.resize(out_idx, (1,))
 
-            out_idx = np.array(sorted(np.concatenate((out_idx, res_idx))))
-            # Update mask to reflect the additional kept filters
-            mask = torch.zeros(len(weight_copy))
-            mask[out_idx] = 1.0 #type: ignore
+            # NOTE: in the original code, they also round the number of filters kept.
+            # I kept it here, if you have divisor == 1 (we do) it doesn't do anything
+            old_prune_len = len(out_idx)
+            new_prune_len = round_to_multiple_of(old_prune_len, divisor)
+
+            if new_prune_len > old_prune_len:  # this is skipped if divisor == 1
+                temp_mask = weight_copy.le(conv_threshold).float()
+                tmp_idx = np.squeeze(np.argwhere(np.asarray(temp_mask.cpu().numpy())))
+                if tmp_idx.size == 1:
+                    tmp_idx = np.resize(tmp_idx, (1,))
+                res_idx = np.random.choice(tmp_idx, new_prune_len - old_prune_len, replace=False)
+
+                out_idx = np.array(sorted(np.concatenate((out_idx, res_idx))))
+                # Update mask to reflect the additional kept filters
+                mask = torch.zeros(len(weight_copy))
+                mask[out_idx] = 1.0  # type: ignore
 
     # Number of output channel
     out_filters = len(out_idx)
@@ -82,7 +94,16 @@ def prune_conv(
     new_batchnorm2d.running_mean = old_batchnorm2d.running_mean[out_idx.tolist()].clone()
     new_batchnorm2d.running_var = old_batchnorm2d.running_var[out_idx.tolist()].clone()
 
-    return new_conv2d, new_batchnorm2d, out_filters, out_idx, mask
+    named_mask = {
+        "mask" : mask, 
+        "layer_type": "conv",
+        "original_filters": old_conv2d.out_channels,
+        "pruned_filters": out_filters,
+        "indices_kept": out_idx,
+
+    }
+
+    return new_conv2d, new_batchnorm2d, out_filters, out_idx, named_mask
 
 
 def prune_basic_block(
@@ -93,9 +114,15 @@ def prune_basic_block(
     in_idx=None,
     minimum_channels=1,
     divisor=1,
+    with_mask=None,
 ):
     """Prune a BasicBlock while maintaining skip connections"""
+
+    # create mask
+    block_masks = {}
+
     # Prune conv1
+    conv1_layer_mask = with_mask["conv1"] if with_mask else None
     new_conv1, new_bn1, out_channels_1, out_idx_1, mask_1 = prune_conv(
         old_block.conv1,
         old_block.bn1,
@@ -105,9 +132,14 @@ def prune_basic_block(
         in_idx=in_idx,
         minimum_channels=minimum_channels,
         divisor=divisor,
+        layer_mask=conv1_layer_mask,
     )
 
+    # store mast first conv
+    block_masks["conv1"] = mask_1
+
     # Prune conv2 - input channels match conv1 output
+    conv2_layer_mask = with_mask["conv2"] if with_mask else None
     new_conv2, new_bn2, out_channels_2, out_idx_2, mask_2 = prune_conv(
         old_block.conv2,
         old_block.bn2,
@@ -117,7 +149,10 @@ def prune_basic_block(
         in_idx=out_idx_1,
         minimum_channels=minimum_channels,
         divisor=divisor,
+        layer_mask=conv2_layer_mask,
     )
+
+    block_masks["conv2"] = mask_2
 
     # Handle downsample if present
     new_downsample = None
@@ -167,14 +202,17 @@ def prune_basic_block(
     new_block.bn2 = new_bn2
     new_block.relu = nn.ReLU(inplace=True)
 
-    return new_block, out_channels_2, out_idx_2, {"conv1": mask_1, "conv2": mask_2}
 
 
-def prune_resnet_features(model, conv_threshold, prune_way, minimum_channels=1, divisor=1):
+    return new_block, out_channels_2, out_idx_2, block_masks
+
+
+def prune_resnet_features(model, conv_threshold, prune_way, minimum_channels=1, divisor=1, with_mask=None):
     """Prune ResNet feature layers"""
     masks = {}
 
     # Prune initial conv layer
+    conv1_layer_mask = with_mask["conv1"] if with_mask else None
     new_conv1, new_bn1, out_channels, out_idx, mask = prune_conv(
         model.conv1,
         model.bn1,
@@ -184,17 +222,12 @@ def prune_resnet_features(model, conv_threshold, prune_way, minimum_channels=1, 
         in_idx=None,
         minimum_channels=minimum_channels,
         divisor=divisor,
+        layer_mask=conv1_layer_mask,
     )
 
     model.conv1 = new_conv1
     model.bn1 = new_bn1
-    masks["conv1"] = {
-        "mask": mask,
-        "layer_type": "conv",
-        "original_filters": model.conv1.out_channels,
-        "pruned_filters": out_channels,
-        "indices_kept": out_idx,
-    }
+    masks["conv1"] = mask
 
     current_channels = out_channels
     current_idx = out_idx
@@ -205,6 +238,18 @@ def prune_resnet_features(model, conv_threshold, prune_way, minimum_channels=1, 
         new_blocks = []
 
         for block_idx, block in enumerate(layer):
+            # Create block-specific mask dictionary
+            block_mask_key = f"{layer_name}.{block_idx}"
+            block_mask = None
+            if with_mask:
+                # Extract masks for this specific block
+                block_mask = {}
+                for conv_name in ["conv1", "conv2"]:
+                    mask_key = f"{block_mask_key}.{conv_name}"
+                    block_mask[conv_name] = with_mask[mask_key]
+                if not block_mask:  # If no masks found for this block
+                    raise Exception(f"No masks found for block {block_idx}")
+
             new_block, current_channels, current_idx, block_masks = prune_basic_block(
                 block,
                 conv_threshold,
@@ -213,19 +258,14 @@ def prune_resnet_features(model, conv_threshold, prune_way, minimum_channels=1, 
                 current_idx,
                 minimum_channels,
                 divisor,
+                with_mask=block_mask,
             )
             new_blocks.append(new_block)
 
             # Store masks
             for conv_name, block_mask in block_masks.items():
                 mask_key = f"{layer_name}.{block_idx}.{conv_name}"
-                masks[mask_key] = {
-                    "mask": block_mask,
-                    "layer_type": "conv",
-                    "original_filters": getattr(block, conv_name.replace("conv", "conv")).out_channels,
-                    "pruned_filters": current_channels,
-                    "indices_kept": current_idx,
-                }
+                masks[mask_key] = block_mask
 
         # Replace the layer with new blocks
         setattr(model, layer_name, nn.Sequential(*new_blocks))
@@ -249,25 +289,38 @@ def prune_resnet_classifier(model, in_channels, in_idx):
     return model
 
 
-def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1):
+def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, with_mask=None):
     """Main function to prune ResNet model"""
-    # Calculate threshold
-    total, total_params_before, threshold = computer_conv_threshold(
-        model, percent, prune_type=KEY_FILTER, prune_way=prune_way
-    )
+    # Calculate threshold (only if not using provided mask)
+    if with_mask is None:
+        total, total_params_before, threshold = computer_conv_threshold(
+            model, percent, prune_type=KEY_FILTER, prune_way=prune_way
+        )
+    else:
+        # When using provided mask, threshold is not used
+        # Calculate original parameters for comparison
+        from tesifedml.prune.utils import count_parameters
+
+        total_params_before = count_parameters(model)
+        threshold = None
 
     # Prune features
     model, final_channels, final_idx, masks = prune_resnet_features(
-        model, threshold, prune_way, minimum_channels, divisor
+        model, threshold, prune_way, minimum_channels, divisor, with_mask
     )
 
     # Adjust classifier (no pruning, just dimension adjustment)
     model = prune_resnet_classifier(model, final_channels, final_idx)
 
     # Calculate final statistics
-    new_total, total_params_after, _ = computer_conv_threshold(
-        model, percent, prune_type=KEY_FILTER, prune_way=prune_way
-    )
+    if with_mask is None:
+        new_total, total_params_after, _ = computer_conv_threshold(
+            model, percent, prune_type=KEY_FILTER, prune_way=prune_way
+        )
+    else:
+        from tesifedml.prune.utils import count_parameters
+
+        total_params_after = count_parameters(model)
 
     param_pruning_ratio = (total_params_before - total_params_after) / total_params_before
 

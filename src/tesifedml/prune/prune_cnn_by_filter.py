@@ -25,41 +25,49 @@ def prune_conv(
     in_idx=None,
     minimum_channels=1,
     divisor=1,
+    layer_mask=None,
 ):
-    weight_copy = computer_weight(old_conv2d.weight, prune_way, (1, 2, 3))
-
-    if (
-        len(weight_copy) <= minimum_channels
-    ):  # NOTE: present in original code, specifies min number of filter in a layer
-        # just specify the indices of the filters maintained, which is the same as no pruning hapened
-        out_idx = np.arange(minimum_channels)
-        mask = torch.ones(len(weight_copy))
-
+    if layer_mask is not None:
+        # Use provided mask
+        mask = layer_mask["mask"]
+        out_idx = np.array(layer_mask["indices_kept"])
+        if len(out_idx.shape) == 0:  # Handle single index case
+            out_idx = np.array([out_idx])
     else:
-        mask = weight_copy.gt(conv_threshold).float()
+        weight_copy = computer_weight(old_conv2d.weight, prune_way, (1, 2, 3))
 
-        # this just creates an array of the indices of ones in the mask
-        # the squeeze is used to make a flat array
-        out_idx = np.squeeze(np.argwhere(np.asarray(mask.cpu().numpy())))
-        if out_idx.size == 1:
-            out_idx = np.resize(out_idx, (1,))
+        if (
+            len(weight_copy) <= minimum_channels
+        ):  # NOTE: present in original code, specifies min number of filter in a layer
+            # just specify the indices of the filters maintained, which is the same as no pruning hapened
+            out_idx = np.arange(minimum_channels)
+            mask = torch.ones(len(weight_copy))
 
-        # NOTE: in the original code, they also round the number of filters kept.
-        # I kept it here, if you have divisor == 1 (we do) it doesn't do anything
-        old_prune_len = len(out_idx)
-        new_prune_len = round_to_multiple_of(old_prune_len, divisor)
+        else:
+            mask = weight_copy.gt(conv_threshold).float()
 
-        if new_prune_len > old_prune_len:  # this is skipped if divisor == 1
-            temp_mask = weight_copy.le(conv_threshold).float()
-            tmp_idx = np.squeeze(np.argwhere(np.asarray(temp_mask.cpu().numpy())))
-            if tmp_idx.size == 1:
-                tmp_idx = np.resize(tmp_idx, (1,))
-            res_idx = np.random.choice(tmp_idx, new_prune_len - old_prune_len, replace=False)
+            # this just creates an array of the indices of ones in the mask
+            # the squeeze is used to make a flat array
+            out_idx = np.squeeze(np.argwhere(np.asarray(mask.cpu().numpy())))
+            if out_idx.size == 1:
+                out_idx = np.resize(out_idx, (1,))
 
-            out_idx = np.array(sorted(np.concatenate((out_idx, res_idx))))
-            # Update mask to reflect the additional kept filters
-            mask = torch.zeros(len(weight_copy))
-            mask[out_idx] = 1.0
+            # NOTE: in the original code, they also round the number of filters kept.
+            # I kept it here, if you have divisor == 1 (we do) it doesn't do anything
+            old_prune_len = len(out_idx)
+            new_prune_len = round_to_multiple_of(old_prune_len, divisor)
+
+            if new_prune_len > old_prune_len:  # this is skipped if divisor == 1
+                temp_mask = weight_copy.le(conv_threshold).float()
+                tmp_idx = np.squeeze(np.argwhere(np.asarray(temp_mask.cpu().numpy())))
+                if tmp_idx.size == 1:
+                    tmp_idx = np.resize(tmp_idx, (1,))
+                res_idx = np.random.choice(tmp_idx, new_prune_len - old_prune_len, replace=False)
+
+                out_idx = np.array(sorted(np.concatenate((out_idx, res_idx))))
+                # Update mask to reflect the additional kept filters
+                mask = torch.zeros(len(weight_copy))
+                mask[out_idx] = 1.0
 
     # Number of output channel
     out_filters = len(out_idx)
@@ -86,7 +94,7 @@ def prune_conv(
     return new_conv2d, new_batchnorm2d, out_filters, out_idx, mask
 
 
-def prune_features(module_list, conv_threshold, prune_way, minimum_channels=1, divisor=1):
+def prune_features(module_list, conv_threshold, prune_way, minimum_channels=1, divisor=1, with_mask=None):
     new_module_list = list()
     masks = {}  # Changed from list to dict
     idx = 0
@@ -106,6 +114,19 @@ def prune_features(module_list, conv_threshold, prune_way, minimum_channels=1, d
             assert isinstance(conv_layer, nn.Conv2d), f"Expected Conv2d, got {type(conv_layer)}"
             assert isinstance(bn_layer, nn.BatchNorm2d), f"Expected BatchNorm2d, got {type(bn_layer)}"
 
+            # Get layer mask if provided
+            layer_name = f"conv_{layer_idx}"
+            layer_mask = None
+            if with_mask is not None:
+                print(conv_layer)
+                # Find the corresponding mask by looking through all mask keys
+                for mask_key, mask_data in with_mask.items():
+                    if mask_key == layer_name:
+                        layer_mask = mask_data
+                        break
+
+                assert layer_mask is not None
+
             new_conv2d, new_batchnorm2d, in_channels, in_idx, mask = prune_conv(
                 conv_layer,
                 bn_layer,
@@ -115,10 +136,10 @@ def prune_features(module_list, conv_threshold, prune_way, minimum_channels=1, d
                 in_idx=in_idx,
                 minimum_channels=minimum_channels,
                 divisor=divisor,
+                layer_mask=layer_mask,
             )
 
             # Store mask information with layer name
-            layer_name = f"conv_{layer_idx}"
             masks[layer_name] = {
                 "mask": mask,
                 "layer_type": "conv",
@@ -197,7 +218,7 @@ def prune_linear(old_linear: nn.Linear, threshold, prune_way, in_cols, in_idx, m
     return new_linear, out_cols, out_idx
 
 
-def prune_classifier(module_list, in_channels, in_idx, threshold, prune_way="mean_abs", minimum_channels=1, divisor=1):
+def prune_classifier(module_list, in_channels, in_idx):
     new_module_list = list()
 
     # For HARBox_CNN: last conv layer has 32 channels and output size is 8x8
@@ -215,13 +236,19 @@ def prune_classifier(module_list, in_channels, in_idx, threshold, prune_way="mea
     return new_module_list
 
 
-def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1):
-    # Count parameters before pruning
-    # total_params_before = count_parameters(model)
+def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, with_mask=None):
+    # Calculate threshold (only if not using provided mask)
+    if with_mask is None:
+        total, total_params_before, threshold = computer_conv_threshold(
+            model, percent, prune_type=KEY_FILTER, prune_way=prune_way
+        )
+    else:
+        # When using provided mask, threshold is not used
+        # Calculate original parameters for comparison
+        from tesifedml.prune.utils import count_parameters
 
-    total, total_params_before, threshold = computer_conv_threshold(
-        model, percent, prune_type=KEY_FILTER, prune_way=prune_way
-    )
+        total_params_before = count_parameters(model)
+        threshold = None
 
     feature_name_list = list()
     feature_module_list = list()
@@ -238,58 +265,47 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1):
         elif name == "":
             continue
 
-    # print(feature_name_list)
-    # print(feature_module_list)
-    # print(len(feature_module_list))
-    # print("-----")
-    # print(classifier_name_list)
-    # print(classifier_module_list)
-
     new_module_list, in_channels, in_idx, masks = prune_features(
         feature_module_list,
         conv_threshold=threshold,
         prune_way=prune_way,
         minimum_channels=minimum_channels,
         divisor=divisor,
+        with_mask=with_mask,
     )
 
-    # Associate actual layer names with masks
-    named_masks = {}
-    conv_layer_count = 0
-    for name in feature_name_list:
-        if "conv" in name and name.endswith(".0"):  # Only for actual conv layers (not sequential or batchnorm)
-            mask_key = f"conv_{conv_layer_count}"
-            if mask_key in masks:
-                named_masks[name] = masks[mask_key]
-                conv_layer_count += 1
+    # # Associate actual layer names with masks
+    # named_masks = {}
+    # conv_layer_count = 0
+    # for name in feature_name_list:
+    #     if "conv" in name and name.endswith(".0"):  # Only for actual conv layers (not sequential or batchnorm)
+    #         mask_key = f"conv_{conv_layer_count}"
+    #         named_masks[name] = masks[mask_key]
+    #         conv_layer_count += 1
 
     assert len(new_module_list) == len(feature_module_list) == len(feature_name_list)
     set_module_list(model, feature_name_list, feature_module_list, new_module_list)
-
-    # print("NEW MODEL AFTER FILTER PRUNING:")
-    # print(model)
 
     # For HARBox_CNN: in_channels * 8 * 8 (since conv2 output is 8x8)
     new_module_list = prune_classifier(
         classifier_module_list,
         in_channels * 8 * 8,
         in_idx,
-        threshold=threshold,
-        prune_way=prune_way,
-        minimum_channels=minimum_channels,
-        divisor=divisor,
     )
     assert len(new_module_list) == len(classifier_module_list) == len(classifier_name_list)
     set_module_list(model, classifier_name_list, classifier_module_list, new_module_list)
 
-    new_total, total_params_after, _ = computer_conv_threshold(
-        model, percent, prune_type=KEY_FILTER, prune_way=prune_way
-    )
+    # Calculate final statistics
+    if with_mask is None:
+        new_total, total_params_after, _ = computer_conv_threshold(
+            model, percent, prune_type=KEY_FILTER, prune_way=prune_way
+        )
+    else:
+        from tesifedml.prune.utils import count_parameters
 
-    # Count parameters after pruning
-    # total_params_after = count_parameters(model)
+        total_params_after = count_parameters(model)
 
     # Calculate parameter-based pruning ratio
     param_pruning_ratio = (total_params_before - total_params_after) / total_params_before
 
-    return model, param_pruning_ratio, threshold, named_masks
+    return model, param_pruning_ratio, threshold, masks

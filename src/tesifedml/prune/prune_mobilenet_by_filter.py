@@ -6,6 +6,7 @@ from .keywords import KEY_FILTER
 from .utils import (
     computer_conv_threshold,
     computer_weight,
+    count_parameters,
     create_batchnorm2d,
     create_conv2d,
     create_linear,
@@ -22,32 +23,42 @@ def prune_pointwise_conv(
     in_idx=None,
     minimum_channels=1,
     divisor=1,
+    layer_mask=None,
 ):
     """Prune pointwise convolution (1x1 conv)"""
-    weight_copy = computer_weight(old_conv2d.weight, prune_way, (1, 2, 3))
 
-    if len(weight_copy) <= minimum_channels:
-        out_idx = np.arange(minimum_channels)
-        mask = torch.ones(len(weight_copy))
+    if layer_mask is not None:
+        # Use provided mask
+        mask = layer_mask["mask"]
+        out_idx = np.array(layer_mask["indices_kept"])
+        if len(out_idx.shape) == 0:  # Handle single index case
+            out_idx = np.array([out_idx])
     else:
-        mask = weight_copy.gt(conv_threshold).float()
-        out_idx = np.squeeze(np.argwhere(np.asarray(mask.cpu().numpy())))
-        if out_idx.size == 1:
-            out_idx = np.resize(out_idx, (1,))
+        # Calculate mask based on threshold
+        weight_copy = computer_weight(old_conv2d.weight, prune_way, (1, 2, 3))
 
-        old_prune_len = len(out_idx)
-        new_prune_len = round_to_multiple_of(old_prune_len, divisor)
+        if len(weight_copy) <= minimum_channels:
+            out_idx = np.arange(minimum_channels)
+            mask = torch.ones(len(weight_copy))
+        else:
+            mask = weight_copy.gt(conv_threshold).float()
+            out_idx = np.squeeze(np.argwhere(np.asarray(mask.cpu().numpy())))
+            if out_idx.size == 1:
+                out_idx = np.resize(out_idx, (1,))
 
-        if new_prune_len > old_prune_len:
-            temp_mask = weight_copy.le(conv_threshold).float()
-            tmp_idx = np.squeeze(np.argwhere(np.asarray(temp_mask.cpu().numpy())))
-            if tmp_idx.size == 1:
-                tmp_idx = np.resize(tmp_idx, (1,))
-            res_idx = np.random.choice(tmp_idx, new_prune_len - old_prune_len, replace=False)
+            old_prune_len = len(out_idx)
+            new_prune_len = round_to_multiple_of(old_prune_len, divisor)
 
-            out_idx = np.array(sorted(np.concatenate((out_idx, res_idx))))
-            mask = torch.zeros(len(weight_copy))
-            mask[out_idx] = 1.0
+            if new_prune_len > old_prune_len:
+                temp_mask = weight_copy.le(conv_threshold).float()
+                tmp_idx = np.squeeze(np.argwhere(np.asarray(temp_mask.cpu().numpy())))
+                if tmp_idx.size == 1:
+                    tmp_idx = np.resize(tmp_idx, (1,))
+                res_idx = np.random.choice(tmp_idx, new_prune_len - old_prune_len, replace=False)
+
+                out_idx = np.array(sorted(np.concatenate((out_idx, res_idx))))
+                mask = torch.zeros(len(weight_copy))
+                mask[out_idx.tolist()] = 1.0
 
     out_filters = len(out_idx)
 
@@ -119,6 +130,7 @@ def prune_basic_conv2d(
     in_idx=None,
     minimum_channels=1,
     divisor=1,
+    layer_mask=None,
 ):
     """Prune a BasicConv2d block"""
     new_conv, new_bn, out_channels, out_idx, mask = prune_pointwise_conv(
@@ -130,6 +142,7 @@ def prune_basic_conv2d(
         in_idx=in_idx,
         minimum_channels=minimum_channels,
         divisor=divisor,
+        layer_mask=layer_mask,
     )
 
     # Create new BasicConv2d block
@@ -151,6 +164,7 @@ def prune_depth_separable_conv2d(
     in_idx=None,
     minimum_channels=1,
     divisor=1,
+    layer_mask=None,
 ):
     """Prune a DepthSeparableConv2d block - only prune the pointwise conv"""
     # Assert that depthwise conv has correct structure
@@ -189,6 +203,7 @@ def prune_depth_separable_conv2d(
         in_idx=in_idx,
         minimum_channels=minimum_channels,
         divisor=divisor,
+        layer_mask=layer_mask,
     )
 
     # Create new DepthSeparableConv2d block
@@ -211,10 +226,9 @@ def prune_depth_separable_conv2d(
     return new_block, out_channels, out_idx, mask
 
 
-def prune_features(model, conv_threshold, prune_way, minimum_channels=1, divisor=1):
+def prune_features(model, conv_threshold, prune_way, minimum_channels=1, divisor=1, with_mask=None):
     """Prune MobileNet features"""
     masks = {}
-    layer_idx = 0
 
     # Start with input channels (grayscale)
     in_channels = 1
@@ -222,6 +236,7 @@ def prune_features(model, conv_threshold, prune_way, minimum_channels=1, divisor
 
     # Prune stem (BasicConv2d + DepthSeparableConv2d)
     # Prune BasicConv2d in stem
+    layer_mask = with_mask.get("stem.0.conv") if with_mask else None
     new_stem_0, in_channels, in_idx, mask = prune_basic_conv2d(
         model.stem[0],
         conv_threshold,
@@ -230,6 +245,7 @@ def prune_features(model, conv_threshold, prune_way, minimum_channels=1, divisor
         in_idx=in_idx,
         minimum_channels=minimum_channels,
         divisor=divisor,
+        layer_mask=layer_mask,
     )
     masks["stem.0.conv"] = {
         "mask": mask,
@@ -240,6 +256,7 @@ def prune_features(model, conv_threshold, prune_way, minimum_channels=1, divisor
     }
 
     # Prune DepthSeparableConv2d in stem
+    layer_mask = with_mask.get("stem.1.pointwise.0") if with_mask else None
     new_stem_1, in_channels, in_idx, mask = prune_depth_separable_conv2d(
         model.stem[1],
         conv_threshold,
@@ -248,6 +265,7 @@ def prune_features(model, conv_threshold, prune_way, minimum_channels=1, divisor
         in_idx=in_idx,
         minimum_channels=minimum_channels,
         divisor=divisor,
+        layer_mask=layer_mask,
     )
     masks["stem.1.pointwise.0"] = {
         "mask": mask,
@@ -265,6 +283,8 @@ def prune_features(model, conv_threshold, prune_way, minimum_channels=1, divisor
         new_blocks = []
 
         for block_idx, block in enumerate(conv_block):
+            mask_key = f"{conv_block_name}.{block_idx}.pointwise.0"
+            layer_mask = with_mask.get(mask_key) if with_mask else None
             new_block, in_channels, in_idx, mask = prune_depth_separable_conv2d(
                 block,
                 conv_threshold,
@@ -273,11 +293,11 @@ def prune_features(model, conv_threshold, prune_way, minimum_channels=1, divisor
                 in_idx=in_idx,
                 minimum_channels=minimum_channels,
                 divisor=divisor,
+                layer_mask=layer_mask,
             )
             new_blocks.append(new_block)
 
             # Store mask
-            mask_key = f"{conv_block_name}.{block_idx}.pointwise.0"
             masks[mask_key] = {
                 "mask": mask,
                 "layer_type": "conv",
@@ -306,23 +326,32 @@ def prune_classifier(model, in_channels, in_idx):
     return model
 
 
-def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1):
+def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, with_mask=None):
     """Main function to prune MobileNet"""
-    # Calculate threshold
-    total, total_params_before, threshold = computer_conv_threshold(
-        model, percent, prune_type=KEY_FILTER, prune_way=prune_way
-    )
+    # Calculate threshold (only if not using provided mask)
+    if with_mask is None:
+        _, total_params_before, threshold = computer_conv_threshold(
+            model, percent, prune_type=KEY_FILTER, prune_way=prune_way
+        )
+    else:
+        # When using provided mask, threshold is not used
+        # Calculate original parameters for comparison
+        total_params_before = count_parameters(model)
+        threshold = None
 
     # Prune features
-    model, final_channels, final_idx, masks = prune_features(model, threshold, prune_way, minimum_channels, divisor)
+    model, final_channels, final_idx, masks = prune_features(
+        model, threshold, prune_way, minimum_channels, divisor, with_mask
+    )
 
     # Adjust classifier
     model = prune_classifier(model, final_channels, final_idx)
 
     # Calculate final statistics
-    new_total, total_params_after, _ = computer_conv_threshold(
-        model, percent, prune_type=KEY_FILTER, prune_way=prune_way
-    )
+    if with_mask is None:
+        _, total_params_after, _ = computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way=prune_way)
+    else:
+        total_params_after = count_parameters(model)
 
     param_pruning_ratio = (total_params_before - total_params_after) / total_params_before
 
