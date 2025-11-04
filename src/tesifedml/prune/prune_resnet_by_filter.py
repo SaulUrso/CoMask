@@ -166,6 +166,7 @@ def prune_basic_block(
         # Copy weights with proper indexing
         new_downsample_conv.weight.data = downsample_conv.weight.data[out_idx_2.tolist(), :, :, :].clone()
         if downsample_conv.bias is not None:
+            assert new_downsample_conv.bias is not None
             new_downsample_conv.bias.data = downsample_conv.bias.data[out_idx_2.tolist()].clone()
 
         if in_idx is not None:
@@ -291,14 +292,21 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, w
     # Calculate threshold (only if not using provided mask)
     total_groups = None
     group_pruning_ratio = None
+    units_pruned = 0
 
     if with_mask is None:
-        total_groups, threshold = computer_conv_threshold(
+        total_groups, threshold, planned_units_pruned = computer_conv_threshold(
             model, percent, prune_type=KEY_FILTER, prune_way=prune_way, ceil=True
         )
+        units_pruned = planned_units_pruned
     else:
         # When using provided mask, threshold is not used
         threshold = None
+        # Calculate units pruned from mask
+        units_pruned = sum(
+            mask_info["original_filters"] - mask_info["pruned_filters"] 
+            for mask_info in with_mask.values()
+        )
 
     # Calculate original parameters for comparison
     from tesifedml.prune.utils import count_parameters
@@ -315,10 +323,16 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, w
 
     # Calculate final statistics
     if with_mask is None:
-        new_total_groups, _ = computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way=prune_way)
-        group_pruning_ratio = (total_groups - new_total_groups) / total_groups
+        new_total_groups, _, _ = computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way=prune_way)
+        group_pruning_ratio = (total_groups - new_total_groups) / total_groups if total_groups is not None else None
+    else:
+        # Recalculate actual units pruned from resulting masks
+        units_pruned = sum(
+            mask_info["original_filters"] - mask_info["pruned_filters"] 
+            for mask_info in masks.values()
+        )
 
     total_params_after = count_parameters(model)
     param_pruning_ratio = (total_params_before - total_params_after) / total_params_before
 
-    return model, param_pruning_ratio, group_pruning_ratio, threshold, masks
+    return model, param_pruning_ratio, group_pruning_ratio, threshold, masks, units_pruned

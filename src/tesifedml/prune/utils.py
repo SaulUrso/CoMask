@@ -9,6 +9,50 @@ def group_lasso_by_filter_or_channel(param_group, dimension):
     return torch.sqrt(torch.sum(param_group**2, dim=dimension))
 
 
+def ssl_loss(model: nn.Module, model_type="resnet", loss_type=KEY_FILTER, lambda_n=1e-5, lambda_c=1e-5):
+    ssl_loss = 0
+
+    if loss_type in [KEY_FILTER, KEY_CHANNEL, KEY_FILTER_AND_CHANNEL]:
+        # Get prunable layers (excluding final classification layer)
+        conv_layers, linear_layers = _get_prunable_layers(model)
+
+        # Process Conv2d layers
+        for name, module in conv_layers:
+            param = module.weight
+
+            if loss_type == KEY_FILTER:
+                # Group LASSO over filters of current layer
+                ssl_loss += lambda_n * torch.sum(group_lasso_by_filter_or_channel(param, (1, 2, 3)))
+            elif loss_type == KEY_CHANNEL:
+                # Group LASSO over channel of current layer
+                ssl_loss += lambda_c * torch.sum(group_lasso_by_filter_or_channel(param, (0, 2, 3)))
+            elif loss_type == KEY_FILTER_AND_CHANNEL:
+                # Group LASSO over filters of current layer
+                ssl_loss += lambda_n * torch.sum(group_lasso_by_filter_or_channel(param, (1, 2, 3)))
+                # Group LASSO over channel of current layer
+                ssl_loss += lambda_c * torch.sum(group_lasso_by_filter_or_channel(param, (0, 2, 3)))
+
+        # Process Linear layers (excluding final layer)
+        for name, module in linear_layers:
+            param = module.weight
+
+            if loss_type == KEY_FILTER:
+                # Treat as filter-wise for linear layers
+                ssl_loss += lambda_n * torch.sum(group_lasso_by_filter_or_channel(param, (1,)))
+            elif loss_type == KEY_CHANNEL:
+                # Treat as channel-wise for linear layers
+                ssl_loss += lambda_c * torch.sum(group_lasso_by_filter_or_channel(param, (0,)))
+            elif loss_type == KEY_FILTER_AND_CHANNEL:
+                # Both filter and channel for linear layers
+                ssl_loss += lambda_n * torch.sum(group_lasso_by_filter_or_channel(param, (1,)))
+                ssl_loss += lambda_c * torch.sum(group_lasso_by_filter_or_channel(param, (0,)))
+
+    else:
+        raise ValueError(f"{model_type} does not supports")
+
+    return ssl_loss
+
+
 def _get_prunable_layers(model):
     """
     Get lists of prunable layers, excluding the final classification layer.
@@ -267,10 +311,20 @@ def computer_conv_with_params(model, conv, param_counts, index, dim, dimension, 
     return conv, param_counts, index
 
 
-def computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way="mean_abs", ceil=False):
+def computer_conv_threshold(model, percent_or_groups, prune_type=KEY_FILTER, prune_way="mean_abs", ceil=False):
     """
-    Calculate pruning threshold of Conv layer based on parameter percentage removal.
+    Calculate pruning threshold of Conv layer based on parameter percentage removal or absolute number of groups.
     Excludes the final classification layer from pruning calculations.
+    
+    Args:
+        model: The model to analyze
+        percent_or_groups: Either percentage (float 0-1) or absolute number of groups to prune (int)
+        prune_type: Type of pruning (KEY_FILTER, KEY_CHANNEL, or KEY_FILTER_AND_CHANNEL)
+        prune_way: Method for computing importance scores
+        ceil: Whether to round up when computing threshold
+        
+    Returns:
+        tuple: (total_groups, threshold, groups_to_prune)
     """
     total_groups = 0
 
@@ -302,18 +356,34 @@ def computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way="me
         raise ValueError(f"{prune_type} does not supports")
 
     y, i = torch.sort(conv)
-    thre_index = int(total_groups * percent)
-    thre = y[thre_index + (1 if ceil else 0)]
+    
+    # Determine if input is percentage or absolute number
+    if isinstance(percent_or_groups, int):
+        # Absolute number of groups to prune
+        groups_to_prune = min(percent_or_groups, total_groups - 1)  # Ensure at least 1 group remains
+        thre_index = groups_to_prune - 1
+        percent = groups_to_prune / total_groups
+    else:
+        # Percentage (float between 0 and 1)
+        percent = percent_or_groups
+        groups_to_prune = int(total_groups * percent) + 1
+        thre_index = groups_to_prune - 1
+    
+    thre = y[thre_index +  (1 if ceil else 0)]
 
     print(f"Total groups: {total_groups}")
-    print(f"Target parameter removal: {percent:.2%}")
-    print(f"Groups to remove: {thre_index + 1}")
-    print(f"Group removal percentage: {(thre_index + 1) / total_groups:.2%}")
+    if isinstance(percent_or_groups, int):
+        print(f"Target groups to prune: {percent_or_groups}")
+        print(f"Actual groups to prune: {groups_to_prune}")
+    else:
+        print(f"Target parameter removal: {percent:.2%}")
+        print(f"Groups to remove: {groups_to_prune}")
+    print(f"Group removal percentage: {groups_to_prune / total_groups:.2%}")
     print(f"Min importance: {y[0]:.6f}")
     print(f"Max importance: {y[-1]:.6f}")
     print(f"Threshold value: {thre:.6f}")
 
-    return total_groups, thre
+    return total_groups, thre, groups_to_prune
 
 
 def create_conv2d(old_conv2d, in_channels, out_filters, old_groups=None):
@@ -329,12 +399,12 @@ def create_conv2d(old_conv2d, in_channels, out_filters, old_groups=None):
     new_conv2d = nn.Conv2d(
         in_channels,
         out_filters,
-        kernel_size=kernel_size,
-        stride=stride,
-        padding=padding,
+        kernel_size=kernel_size,  # type: ignore
+        stride=stride,  # type: ignore
+        padding=padding,  # type: ignore
         padding_mode=padding_mode,
         groups=groups,
-        dilation=dilation,
+        dilation=dilation,  # type: ignore
         bias=bias,
     )
     return new_conv2d

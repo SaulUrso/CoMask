@@ -3,13 +3,14 @@ from typing import Any, Dict, List
 import torch
 
 
-def vote_mask(masks_list: List[Dict[str, Any]], percentage: float, min_filters: int = 1) -> Dict[str, Any]:
+def vote_mask(masks_list: List[Dict[str, Any]], percentage_or_units, min_filters: int = 1) -> Dict[str, Any]:
     """
     Calculate votes for each unit/group across multiple masks and create consolidated mask.
 
     Args:
         masks_list: List of mask dictionaries from prune() functions (mobilenet, resnet, cnn)
-        percentage: Percentage of least voted units to remove (0.0 to 1.0)
+        percentage_or_units: Either percentage of least voted units to remove (float 0.0-1.0)
+                           or absolute number of units to remove (int)
         min_filters: Minimum number of filters that must remain in each layer (default: 1)
 
     Returns:
@@ -21,12 +22,20 @@ def vote_mask(masks_list: List[Dict[str, Any]], percentage: float, min_filters: 
         >>> mask2 = {"conv1": {"mask": torch.tensor([1., 1., 0., 0.]), "layer_type": "conv",
         ...                    "original_filters": 4, "pruned_filters": 2, "indices_kept": np.array([0, 1])}}
         >>> consolidated = vote_mask([mask1, mask2], 0.25)  # Remove 25% least voted
+        >>> consolidated = vote_mask([mask1, mask2], 2)     # Remove 2 least voted units
     """
     if not masks_list:
         raise ValueError("masks_list cannot be empty")
 
-    if not (0.0 <= percentage <= 1.0):
-        raise ValueError("percentage must be between 0.0 and 1.0")
+    # Validate input based on type
+    if isinstance(percentage_or_units, int):
+        if percentage_or_units < 0:
+            raise ValueError("units_to_remove must be non-negative")
+    elif isinstance(percentage_or_units, float):
+        if not (0.0 <= percentage_or_units <= 1.0):
+            raise ValueError("percentage must be between 0.0 and 1.0")
+    else:
+        raise ValueError("percentage_or_units must be either float (percentage) or int (absolute units)")
 
     if min_filters < 1:
         raise ValueError("min_filters must be at least 1")
@@ -83,7 +92,13 @@ def vote_mask(masks_list: List[Dict[str, Any]], percentage: float, min_filters: 
 
     # Calculate how many units to remove globally
     total_units = len(all_votes)
-    units_to_remove = int(total_units * percentage)
+    if isinstance(percentage_or_units, int):
+        # Absolute number of units to remove
+        assert percentage_or_units < total_units - min_filters * len(all_layer_names)
+        units_to_remove = percentage_or_units
+    else:
+        # Percentage of units to remove
+        units_to_remove = int(total_units * percentage_or_units) + 1
 
     # needed to see how many units we are removing, to not remove all of them
     units_to_remove_set = set()

@@ -13,14 +13,14 @@ def prune_model(model, percent, prune_way="mean_abs", minimum_channels=1, diviso
 
     Args:
         model: The model to prune (HARBox_CNN, MobileNet, or ResNet)
-        percent: Pruning percentage
+        percent: Pruning percentage or absolute number of groups to prune
         prune_way: Pruning method ("mean_abs", etc.)
         minimum_channels: Minimum channels to keep in each layer
         divisor: Divisor for rounding channel numbers
         with_mask: Optional pre-computed mask for pruning
 
     Returns:
-        tuple: (pruned_model, param_pruning_ratio, group_pruning_ratio, threshold, masks)
+        tuple: (pruned_model, param_pruning_ratio, group_pruning_ratio, threshold, masks, units_pruned)
     """
     if isinstance(model, HARBox_CNN):
         return prune_cnn_by_filter.prune(

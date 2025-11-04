@@ -8,7 +8,7 @@ from fedml.ml.trainer.trainer_creator import create_model_trainer
 from torch import nn
 
 import wandb
-from tesifedml.clients.prune_client import PruneClient
+from tesifedml.clients.prune_client import ModelTrainerSSL, PruneClient
 from tesifedml.prune.mask_vote import vote_mask
 from tesifedml.prune.unified_prune import prune_model
 from tesifedml.prune.utils import shuffle_mask
@@ -46,13 +46,22 @@ class PruneClusterAPI(ClusterAPI):
         self.client_weights = []
 
         logging.info("model = {}".format(model))
-        self.model_trainer = create_model_trainer(model, args)
+
+        if args.ssl_coefficient > 0.0:
+            self.model_trainer = ModelTrainerSSL(model, args)
+            logging.info("Using ModelTrainerSSL with ssl_coefficient = {}".format(args.ssl_coefficient))
+        else:
+            self.model_trainer = create_model_trainer(model, args)
+            logging.info("Using standard model trainer")
+
         self.model = model
         # Store cluster-specific models
         self.cluster_models: Dict[int, nn.Module] = {}
         # Proposal mechanism for pruning
         self.cluster_prune_counters: Dict[int, int] = {}  # How many times each cluster can prune
         self.cluster_mask_proposals: Dict[int, Dict[int, Dict]] = {}  # cluster_id -> {client_id: mask}
+        # Track units pruned in first pruning for consistency
+        self.cluster_first_prune_units: Dict[int, Optional[int]] = {}  # cluster_id -> units_pruned
         logging.info("self.model_trainer = {}".format(self.model_trainer))
 
         self._setup_clients(
@@ -114,6 +123,8 @@ class PruneClusterAPI(ClusterAPI):
             self.cluster_prune_counters[group_idx] = 3
             # Initialize mask proposal dictionaries for each cluster
             self.cluster_mask_proposals[group_idx] = {}
+            # Initialize first pruning units tracker
+            self.cluster_first_prune_units[group_idx] = None
 
         self.client_weights = [copy.deepcopy(w_global)] * (self.args.client_num_in_total)
 
@@ -159,7 +170,15 @@ class PruneClusterAPI(ClusterAPI):
 
                     # train on new dataset
                     mlops.event("train", event_started=True, event_value="{}_{}".format(str(round_idx), str(idx)))
-                    w = client.train(copy.deepcopy(w_curr_group))
+                    # If this cluster finished pruning (counter == 0), disable SSL regularization
+                    # by passing a temporary args override with ssl_coefficient = 0.0.
+                    if self.cluster_prune_counters[group_idx] <= 0:
+                        args_override = copy.deepcopy(self.args)
+                        args_override.ssl_coefficient = 0.0
+                    else:
+                        args_override = None
+
+                    w = client.train(copy.deepcopy(w_curr_group), args_override)
                     mlops.event("train", event_started=False, event_value="{}_{}".format(str(round_idx), str(idx)))
 
                     # self.logging.info("local weights = " + str(w))
@@ -212,21 +231,35 @@ class PruneClusterAPI(ClusterAPI):
         cluster_seed = round_idx * (group_idx + 1)
 
         # Read args once
-        prune_percent = self.args.prune_percent
         prune_way = getattr(self.args, "prune_way", "group_lasso")
         minimum_channels = getattr(self.args, "minimum_channels", 1)
         divisor = getattr(self.args, "divisor", 1)
 
+        # Determine pruning amount: use same units as first pruning or percentage
+        if self.cluster_first_prune_units[group_idx] is None:
+            # First pruning for this cluster - use percentage
+            prune_param = self.args.prune_percent
+            logging.info(f"First pruning for cluster {group_idx} using percentage: {prune_param}")
+        else:
+            # Subsequent pruning - use same number of units as first pruning
+            prune_param = self.cluster_first_prune_units[group_idx]
+            logging.info(f"Subsequent pruning for cluster {group_idx} using same units: {prune_param}")
+
         # Generate baseline mask using cluster's current model
         temp_model = copy.deepcopy(self.cluster_models[group_idx]).cpu()
         temp_model.load_state_dict(self.w_groups[group_idx])
-        _, _, group_pruning_ratio, _, baseline_mask = prune_model(
+        _, _, group_pruning_ratio, _, baseline_mask, units_pruned = prune_model(
             temp_model,
-            percent=prune_percent,
+            percent=prune_param,
             prune_way=prune_way,
             minimum_channels=minimum_channels,
             divisor=divisor,
         )
+
+        # Track units pruned in first pruning
+        if self.cluster_first_prune_units[group_idx] is None:
+            self.cluster_first_prune_units[group_idx] = units_pruned
+            logging.info(f"Recorded {units_pruned} units pruned for cluster {group_idx} first pruning")
 
         # Generate random mask with same pruning ratio
         random_mask = shuffle_mask(baseline_mask, cluster_seed)
@@ -234,9 +267,9 @@ class PruneClusterAPI(ClusterAPI):
         # Apply random mask to cluster's model
         cluster_model = copy.deepcopy(self.cluster_models[group_idx]).cpu()
         cluster_model.load_state_dict(self.w_groups[group_idx])
-        pruned_cluster_model, _, _, _, _ = prune_model(
+        pruned_cluster_model, _, _, _, _, _ = prune_model(
             cluster_model,
-            prune_percent,
+            prune_param,
             prune_way,
             minimum_channels,
             divisor,
@@ -248,9 +281,9 @@ class PruneClusterAPI(ClusterAPI):
         for client_idx in self.group_dict[group_idx]:
             client_model = copy.deepcopy(self.cluster_models[group_idx]).cpu()
             client_model.load_state_dict(self.client_weights[client_idx])
-            pruned_client_model, _, _, _, _ = prune_model(
+            pruned_client_model, _, _, _, _, _ = prune_model(
                 client_model,
-                prune_percent,
+                prune_param,
                 prune_way,
                 minimum_channels,
                 divisor,
@@ -325,15 +358,20 @@ class PruneClusterAPI(ClusterAPI):
         temp_model.load_state_dict(self.w_groups[group_idx])
 
         # Read args once for pruning
-        prune_percent = self.args.prune_percent
         prune_way = getattr(self.args, "prune_way", "group_lasso")
         minimum_channels = getattr(self.args, "minimum_channels", 1)
         divisor = getattr(self.args, "divisor", 1)
 
+        # Determine pruning amount: use same units as first pruning or percentage
+        if self.cluster_first_prune_units[group_idx] is None:
+            prune_param = self.args.prune_percent
+        else:
+            prune_param = self.cluster_first_prune_units[group_idx]
+
         # Generate mask proposal
-        _, _, _, _, mask_proposal = prune_model(
+        _, _, _, _, mask_proposal, _ = prune_model(
             temp_model,
-            percent=prune_percent,
+            percent=prune_param,
             prune_way=prune_way,
             minimum_channels=minimum_channels,
             divisor=divisor,
@@ -346,13 +384,17 @@ class PruneClusterAPI(ClusterAPI):
         # Collect all mask proposals for this cluster
         mask_proposals = list(self.cluster_mask_proposals[group_idx].values())
 
-        # Use vote_mask to consolidate proposals
-        # We use a small percentage (e.g., 0.1) to remove only the least voted units
-        consolidation_percentage = self.args.consolidation_percentage
 
-        voted_mask = vote_mask(mask_proposals, consolidation_percentage)
+
+        if self.cluster_first_prune_units[group_idx] is not None:
+            consolidation_param = self.cluster_first_prune_units[group_idx]
+            logging.info(f"Using {consolidation_param} units for mask voting in cluster {group_idx}")
+        else:
+            consolidation_param = self.args.consolidation_percentage
+            logging.info(f"Using {consolidation_param} percentage for mask voting in cluster {group_idx}")
+
+        voted_mask = vote_mask(mask_proposals, consolidation_param)
         logging.info(f"Consolidated {len(mask_proposals)} mask proposals for cluster {group_idx}")
-
 
         prune_percent = self.args.prune_percent
         prune_way = getattr(self.args, "prune_way", "group_lasso")
@@ -363,7 +405,7 @@ class PruneClusterAPI(ClusterAPI):
         cluster_model = copy.deepcopy(self.cluster_models[group_idx]).cpu()
         cluster_model.load_state_dict(self.w_groups[group_idx])
 
-        pruned_cluster_model, _, _, _, _ = prune_model(
+        pruned_cluster_model, _, _, _, _, units_pruned = prune_model(
             cluster_model,
             prune_percent,
             prune_way,
@@ -379,7 +421,7 @@ class PruneClusterAPI(ClusterAPI):
         for client_idx in self.group_dict[group_idx]:
             client_model = copy.deepcopy(self.cluster_models[group_idx]).cpu()
             client_model.load_state_dict(self.client_weights[client_idx])
-            pruned_client_model, _, _, _, _ = prune_model(
+            pruned_client_model, _, _, _, _, _ = prune_model(
                 client_model,
                 prune_percent,
                 prune_way,
@@ -390,6 +432,10 @@ class PruneClusterAPI(ClusterAPI):
             self.client_weights[client_idx] = pruned_client_model.state_dict()
 
         self.cluster_models[group_idx] = pruned_cluster_model
+
+        if self.cluster_first_prune_units[group_idx] is None:
+            self.cluster_first_prune_units[group_idx] = units_pruned
+            logging.info(f"Recorded {units_pruned} units pruned for cluster {group_idx} first voted mask pruning ")
 
     def _evaluate_client_with_models(self, client: PruneClient, client_idx):
         """Evaluate a single client with both personal and cluster models."""
