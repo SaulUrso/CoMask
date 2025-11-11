@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 # Import your custom adapter and data loading functions
 from tesifedml.clustering.clustering import perform_clustering_svd
 from tesifedml.data.adapters import FedMLAdapter
-from tesifedml.data.dataload import collate_fn, combine_batches, load_my_data
+from tesifedml.data.dataload import collate_fn, load_my_data
 from tesifedml.data.partition import create_natural_test_sets, partition
 from tesifedml.models.cnn import HARBox_CNN
 from tesifedml.models.mobilenet import MobileNet
@@ -78,7 +78,7 @@ if __name__ == "__main__":
         full_batch = False
         if args.batch_size == -1:
             full_batch = True
-            args.batch_size = 32
+            args.batch_size = 128
 
         sep_test_loader = DataLoader(
             separate_test_set,  # type:ignore
@@ -88,8 +88,8 @@ if __name__ == "__main__":
             num_workers=getattr(args, "num_workers", 0),
         )
 
-        if full_batch:
-            sep_test_loader = combine_batches(sep_test_loader)
+        # if full_batch:
+        #     sep_test_loader = combine_batches(sep_test_loader)
 
         args.sep_test_loader = sep_test_loader
 
