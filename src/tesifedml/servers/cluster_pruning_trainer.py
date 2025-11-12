@@ -168,6 +168,14 @@ class PruneClusterAPI(ClusterAPI):
                         local_val_data=self.val_data_local_dict[client_idx],
                     )
 
+                    # MASK PROPOSAL PHASE: Before training, client proposes mask if using proposal mechanism
+                    if self.args.pruning == "proposal" and self.cluster_prune_counters[group_idx] > 0:
+                        if client_idx not in self.cluster_mask_proposals[group_idx]:
+                            mask_proposal = self._generate_client_mask_proposal(group_idx, client_idx)
+                            if mask_proposal is not None:
+                                self.cluster_mask_proposals[group_idx][client_idx] = mask_proposal
+                                logging.info(f"Client {client_idx} in cluster {group_idx} proposed a mask before training")
+
                     # train on new dataset
                     mlops.event("train", event_started=True, event_value="{}_{}".format(str(round_idx), str(idx)))
                     # If this cluster finished pruning (counter == 0), disable SSL regularization
@@ -208,8 +216,7 @@ class PruneClusterAPI(ClusterAPI):
                 if self.args.pruning == "random" and round_idx % 50 == 0 and round_idx != 0:
                     self._prune_cluster_clients(group_idx, round_idx)
                 elif self.args.pruning == "proposal":
-                    self._handle_proposal_mechanism(group_idx, round_idx, client_indexes)
-
+                    self._handle_mask_voting_and_pruning(group_idx, round_idx)
             # at last round
             if round_idx == self.args.comm_round - 1:
                 self._local_test_on_all_clients(round_idx)
@@ -297,20 +304,11 @@ class PruneClusterAPI(ClusterAPI):
             f"Applied random pruning to cluster {group_idx} with {group_pruning_ratio:.2%} parameter reduction"
         )
 
-    def _handle_proposal_mechanism(self, group_idx: int, round_idx: int, client_indexes: List[int]):
-        """Handle mask proposal mechanism for a cluster."""
+    def _handle_mask_voting_and_pruning(self, group_idx: int, round_idx: int):
+        """Handle mask voting and pruning for a cluster after aggregation."""
         # Check if this cluster can still prune
         if self.cluster_prune_counters[group_idx] <= 0:
             return
-
-        # Collect mask proposals from clients in this round
-        for client_idx in client_indexes:
-            if client_idx not in self.cluster_mask_proposals[group_idx]:
-                # Client hasn't proposed yet, generate a mask proposal
-                mask_proposal = self._generate_client_mask_proposal(group_idx, client_idx)
-                if mask_proposal is not None:
-                    self.cluster_mask_proposals[group_idx][client_idx] = mask_proposal
-                    logging.info(f"Client {client_idx} in cluster {group_idx} proposed a mask")
 
         # Check if we have enough proposals for consensus
         total_clients_in_cluster = len(self.group_dict[group_idx])
