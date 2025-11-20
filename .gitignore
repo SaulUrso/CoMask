@@ -46,3 +46,6 @@ Notes.md
 # plots
 plots/*
 *.png
+
+#main 
+main*.py
