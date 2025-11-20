@@ -8,6 +8,12 @@ wheels/
 *.egg-info
 .env
 
+#Notebooks 
+*.ipynb
+
+# other scripts
+*.sh
+
 # Virtual environments
 .venv
 
@@ -30,6 +36,13 @@ Notes.md
 
 #other junk
 *.pkl
+*.out
+*.npy
+
 
 
 *HAR*
+
+# plots
+plots/*
+*.png
