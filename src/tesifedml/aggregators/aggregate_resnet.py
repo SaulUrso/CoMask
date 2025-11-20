@@ -288,9 +288,11 @@ def _aggregate_conv_bn(
 
             bn_count[original_idx] += weight
 
-    # Apply weighted averages using vectorized operations
+    # Apply weighted averages using torch.where to handle broadcasting properly
+    # Create a mask for non-zero counts (shape: [out_channels, in_channels, 1, 1])
     mask = conv_weight_count > 0
-    aggregated_conv.weight.data[mask] = conv_weight_sum[mask] / conv_weight_count[mask]
+    # Divide element-wise where mask is True, preserving spatial dimensions
+    aggregated_conv.weight.data = torch.where(mask, conv_weight_sum / conv_weight_count, aggregated_conv.weight.data)
 
     if conv_bias_sum is not None and aggregated_conv.bias is not None:
         bias_mask = conv_bias_count > 0
@@ -428,9 +430,11 @@ def _aggregate_downsample(
 
             bn_count[original_idx] += weight
 
-    # Apply weighted averages using vectorized operations
+    # Apply weighted averages using torch.where to handle broadcasting properly
+    # Create a mask for non-zero counts (shape: [out_channels, in_channels, 1, 1])
     mask = conv_weight_count > 0
-    aggregated_conv.weight.data[mask] = conv_weight_sum[mask] / conv_weight_count[mask]
+    # Divide element-wise where mask is True, preserving spatial dimensions
+    aggregated_conv.weight.data = torch.where(mask, conv_weight_sum / conv_weight_count, aggregated_conv.weight.data)
 
     if conv_bias_sum is not None and aggregated_conv.bias is not None:
         bias_mask = conv_bias_count > 0
