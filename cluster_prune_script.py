@@ -4,7 +4,7 @@ FedML training script adapted to use the custom data partitioning
 
 import fedml
 from fedml import FedMLRunner
-from fedml.model.cv.resnet_cifar import resnet18_cifar
+from tesifedml.models.resnet_cifar import resnet18_cifar
 from torch.utils.data import DataLoader
 
 # Import your custom adapter and data loading functions
