@@ -271,8 +271,8 @@ class FedMLAdapter:
                 null_idexes.append(client_id)
                 test_data_local_dict[client_id] = None
 
-        print(f"NULL_COUNT: {null_count}")
-        print(f"NULL_idexes: {null_idexes}")
+        # print(f"NULL_COUNT: {null_count}")
+        # print(f"NULL_idexes: {null_idexes}")
 
         if full_batch:
             # train_data_global = combine_batches(train_data_global)

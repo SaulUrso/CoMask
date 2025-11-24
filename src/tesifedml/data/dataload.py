@@ -106,7 +106,7 @@ def load_femnist(test_only_users=None, test_only_user_seed=42):
 
     # Now create train/test splits from remaining train data
     # Group remaining train data by writer_id
-    print("iterating writer")
+    # print("iterating writer")
     writer_data = {}
     for i, writer_id in enumerate(dataset["train"]["writer_id"]):
         if writer_id not in writer_data:

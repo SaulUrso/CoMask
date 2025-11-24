@@ -244,7 +244,7 @@ def computer_conv_with_params(model, conv, param_counts, index, dim, dimension, 
 
     # Process Conv2d layers
     for layer_idx, (name, m) in enumerate(conv_layers):
-        print(name)
+        # print(name)
         size = m.weight.data.shape[dim]
         conv[index : (index + size)] = computer_weight(m.weight, prune_way, dimension)
 
@@ -371,17 +371,17 @@ def computer_conv_threshold(model, percent_or_groups, prune_type=KEY_FILTER, pru
     
     thre = y[thre_index +  (1 if ceil else 0)]
 
-    print(f"Total groups: {total_groups}")
-    if isinstance(percent_or_groups, int):
-        print(f"Target groups to prune: {percent_or_groups}")
-        print(f"Actual groups to prune: {groups_to_prune}")
-    else:
-        print(f"Target parameter removal: {percent:.2%}")
-        print(f"Groups to remove: {groups_to_prune}")
-    print(f"Group removal percentage: {groups_to_prune / total_groups:.2%}")
-    print(f"Min importance: {y[0]:.6f}")
-    print(f"Max importance: {y[-1]:.6f}")
-    print(f"Threshold value: {thre:.6f}")
+    # print(f"Total groups: {total_groups}")
+    # if isinstance(percent_or_groups, int):
+    #     # print(f"Target groups to prune: {percent_or_groups}")
+    #     # print(f"Actual groups to prune: {groups_to_prune}")
+    # else:
+    #     # print(f"Target parameter removal: {percent:.2%}")
+    #     # print(f"Groups to remove: {groups_to_prune}")
+    # # print(f"Group removal percentage: {groups_to_prune / total_groups:.2%}")
+    # # print(f"Min importance: {y[0]:.6f}")
+    # # print(f"Max importance: {y[-1]:.6f}")
+    # # print(f"Threshold value: {thre:.6f}")
 
     return total_groups, thre, groups_to_prune
 

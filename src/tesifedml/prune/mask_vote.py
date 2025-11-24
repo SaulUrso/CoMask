@@ -153,17 +153,17 @@ def vote_mask(masks_list: List[Dict[str, Any]], percentage_or_units, min_filters
 
 def print_vote_statistics(masks_list: List[Dict[str, Any]]) -> None:
     """
-    Print statistics about votes across multiple masks.
+    # print statistics about votes across multiple masks.
 
     Args:
         masks_list: List of mask dictionaries from prune() functions
     """
     if not masks_list:
-        print("No masks provided")
+        # print("No masks provided")
         return
 
-    print(f"Vote statistics for {len(masks_list)} masks:")
-    print("-" * 50)
+    # print(f"Vote statistics for {len(masks_list)} masks:")
+    # print("-" * 50)
 
     # Get all unique layer names
     all_layer_names = set()
@@ -192,19 +192,18 @@ def print_vote_statistics(masks_list: List[Dict[str, Any]]) -> None:
                 if len(mask_tensor) == original_size:
                     votes += mask_tensor
 
-        min_votes = votes.min().item()
-        max_votes = votes.max().item()
-        mean_votes = votes.mean().item()
-
-        print(f"Layer {layer_name}:")
-        print(f"  Units: {original_size}")
-        print(f"  Votes per unit - Min: {min_votes:.1f}, Max: {max_votes:.1f}, Mean: {mean_votes:.2f}")
-        print(f"  Total votes: {votes.sum().item():.0f}")
+        # min_votes = votes.min().item()
+        # max_votes = votes.max().item()
+        # mean_votes = votes.mean().item()
+        # print(f"Layer {layer_name}:")
+        # print(f"  Units: {original_size}")
+        # print(f"  Votes per unit - Min: {min_votes:.1f}, Max: {max_votes:.1f}, Mean: {mean_votes:.2f}")
+        # print(f"  Total votes: {votes.sum().item():.0f}")
 
         total_units += original_size
         total_votes += votes.sum().item()
 
-    print("-" * 50)
-    print(f"Total units across all layers: {total_units}")
-    print(f"Total votes across all layers: {total_votes:.0f}")
-    print(f"Average votes per unit: {total_votes / total_units:.2f}")
+    # print("-" * 50)
+    # print(f"Total units across all layers: {total_units}")
+    # print(f"Total votes across all layers: {total_votes:.0f}")
+    # print(f"Average votes per unit: {total_votes / total_units:.2f}")

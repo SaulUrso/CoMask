@@ -70,7 +70,7 @@ def dirichlet_partition(
             proportions: np.ndarray[Any, np.dtype[np.float64]] = rng.dirichlet(
                 np.repeat(data_split_alpha, num_clients)
             )
-            print(proportions)
+            # print(proportions)
             class_proportions.append(proportions)
 
         for k in range(K):
@@ -455,10 +455,10 @@ def create_natural_test_sets(
         
         client_test_sets.append(client_test_set)
 
-    print(f"✓ Created {len(client_test_sets)} personalized test sets based on '{feature_column}'")
-    print(f"✓ Test samples per client: min={min([len(ds) for ds in client_test_sets if ds is not None])}, "
-          f"max={max([len(ds) for ds in client_test_sets if ds is not None])}, "
-          f"mean={np.mean([len(ds) for ds in client_test_sets if ds is not None]):.1f}")
+    # print(f"✓ Created {len(client_test_sets)} personalized test sets based on '{feature_column}'")
+    # print(f"✓ Test samples per client: min={min([len(ds) for ds in client_test_sets if ds is not None])}, "
+    #       f"max={max([len(ds) for ds in client_test_sets if ds is not None])}, "
+    #       f"mean={np.mean([len(ds) for ds in client_test_sets if ds is not None]):.1f}")
 
     return client_test_sets
 
@@ -496,8 +496,8 @@ def create_and_save_partition(
     with open(save_path, "wb") as f:
         pickle.dump(client_indices, f)
 
-    print(f"✓ Created {method} partition with {num_clients} clients")
-    print(f"✓ Saved to {save_path}")
+    # print(f"✓ Created {method} partition with {num_clients} clients")
+    # print(f"✓ Saved to {save_path}")
 
     return client_indices
 
@@ -506,7 +506,7 @@ def load_partition_indices(load_path: str) -> Dict[int, List[int]]:
     """Load saved partition indices"""
     with open(load_path, "rb") as f:
         partitions = pickle.load(f)
-    print(f"✓ Loaded partition from {load_path}")
+    # print(f"✓ Loaded partition from {load_path}")
     return partitions
 
 
@@ -540,7 +540,7 @@ def partition_dataset_natural(
     # Get unique feature values
     feature_values = np.array(dataset[feature_column])
     unique_values = np.unique(feature_values)
-    print(f"UNIQUE values = {len(unique_values)}")
+    # print(f"UNIQUE values = {len(unique_values)}")
 
     # Group indices by feature value
     client_data_indices = {}
@@ -557,12 +557,12 @@ def partition_dataset_natural(
         client_dataset = dataset.select(indices)
         client_datasets.append(client_dataset)
 
-    print(f"✓ Created natural partition with {len(client_datasets)} clients based on '{feature_column}'")
-    print(
-        f"✓ Samples per client: min={min([len(ds) for ds in client_datasets])}, "
-        f"max={max([len(ds) for ds in client_datasets])}, "
-        f"mean={np.mean([len(ds) for ds in client_datasets]):.1f}"
-    )
+    # print(f"✓ Created natural partition with {len(client_datasets)} clients based on '{feature_column}'")
+    # print(
+    #     f"✓ Samples per client: min={min([len(ds) for ds in client_datasets])}, "
+    #     f"max={max([len(ds) for ds in client_datasets])}, "
+    #     f"mean={np.mean([len(ds) for ds in client_datasets]):.1f}"
+    # )
 
     return client_datasets
 

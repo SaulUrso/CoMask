@@ -119,7 +119,7 @@ def prune_features(module_list, conv_threshold, prune_way, minimum_channels=1, d
             layer_name = f"conv_{layer_idx}"
             layer_mask = None
             if with_mask is not None:
-                print(conv_layer)
+                # print(conv_layer)
                 # Find the corresponding mask by looking through all mask keys
                 for mask_key, mask_data in with_mask.items():
                     if mask_key == layer_name:
