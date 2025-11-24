@@ -112,7 +112,7 @@ class ClusterAPI(object):
             lower_bound = max(1, int(np.floor(quota)))
             cluster_sampling_quota[group_idx] = lower_bound
 
-        print(f"PRE QUOTAS: {cluster_sampling_quota}")
+        # print(f"PRE QUOTAS: {cluster_sampling_quota}")
 
         # Calculate the fractional parts for each cluster
         fractional_parts = {
@@ -135,7 +135,7 @@ class ClusterAPI(object):
             fractional_parts[selected_cluster] = 0  # Remove the selected cluster from further sampling
             current_total += 1
 
-        print(f"POST QUOTAS: {cluster_sampling_quota}")
+        # print(f"POST QUOTAS: {cluster_sampling_quota}")
 
         # Sample clients from each cluster based on the adjusted quota
         sampled_client_indexes = []
@@ -175,6 +175,10 @@ class ClusterAPI(object):
 
         sep_test_loader = getattr(self.args, "sep_test_loader", None)
 
+        # Collect all metrics in a single dictionary for wandb
+        wandb_metrics = {"round": round_idx}
+        mlops_metrics = {"round": round_idx}
+
         # Evaluate each group's model separately
         for group_idx, group_w in self.w_groups.items():
             # Set model to current group's weights
@@ -190,13 +194,11 @@ class ClusterAPI(object):
             total_test_samples += test_metrics["test_total"]
             total_test_loss += test_metrics["test_loss"]
 
-            # Log individual group metrics
-            if self.args.enable_wandb:
-                wandb.log({f"Server/Group_{group_idx}/FullTest/Acc": test_acc, "round": round_idx})
-                wandb.log({f"Server/Group_{group_idx}/FullTest/Loss": test_loss, "round": round_idx})
-
-            mlops.log({f"Server/Group_{group_idx}/FullTest/Acc": test_acc, "round": round_idx})
-            mlops.log({f"Server/Group_{group_idx}/FullTest/Loss": test_loss, "round": round_idx})
+            # Add individual group metrics to batch
+            wandb_metrics[f"Server/Group_{group_idx}/FullTest/Acc"] = test_acc
+            wandb_metrics[f"Server/Group_{group_idx}/FullTest/Loss"] = test_loss
+            mlops_metrics[f"Server/Group_{group_idx}/FullTest/Acc"] = test_acc
+            mlops_metrics[f"Server/Group_{group_idx}/FullTest/Loss"] = test_loss
 
             if sep_test_loader is not None:
                 sep_test_metrics = self.model_trainer.test(sep_test_loader, self.device, self.args)
@@ -208,36 +210,37 @@ class ClusterAPI(object):
                 total_sep_test_samples += sep_test_metrics["test_total"]
                 total_sep_test_loss += sep_test_metrics["test_loss"]
 
-                # Log individual group metrics for separate test
-                if self.args.enable_wandb:
-                    wandb.log({f"Server/Group_{group_idx}/SepTest/Acc": sep_test_acc, "round": round_idx})
-                    wandb.log({f"Server/Group_{group_idx}/SepTest/Loss": sep_test_loss, "round": round_idx})
+                # Add individual group metrics for separate test to batch
+                wandb_metrics[f"Server/Group_{group_idx}/SepTest/Acc"] = sep_test_acc
+                wandb_metrics[f"Server/Group_{group_idx}/SepTest/Loss"] = sep_test_loss
+                mlops_metrics[f"Server/Group_{group_idx}/SepTest/Acc"] = sep_test_acc
+                mlops_metrics[f"Server/Group_{group_idx}/SepTest/Loss"] = sep_test_loss
 
-                mlops.log({f"Server/Group_{group_idx}/SepTest/Acc": sep_test_acc, "round": round_idx})
-                mlops.log({f"Server/Group_{group_idx}/SepTest/Loss": sep_test_loss, "round": round_idx})
-
-        # Calculate and log aggregate statistics across all groups
+        # Calculate and add aggregate statistics across all groups
         avg_test_acc = total_test_correct / total_test_samples
         avg_test_loss = total_test_loss / total_test_samples
 
-        if self.args.enable_wandb:
-            wandb.log({"Server/FullTest/Acc": avg_test_acc, "round": round_idx})
-            wandb.log({"Server/FullTest/Loss": avg_test_loss, "round": round_idx})
-
-        mlops.log({"Server/FullTest/Acc": avg_test_acc, "round": round_idx})
-        mlops.log({"Server/FullTest/Loss": avg_test_loss, "round": round_idx})
+        wandb_metrics["Server/FullTest/Acc"] = avg_test_acc
+        wandb_metrics["Server/FullTest/Loss"] = avg_test_loss
+        mlops_metrics["Server/FullTest/Acc"] = avg_test_acc
+        mlops_metrics["Server/FullTest/Loss"] = avg_test_loss
 
         if sep_test_loader is not None:
-            # Calculate and log aggregate statistics across all groups
+            # Calculate and add aggregate statistics for separate test
             avg_sep_test_acc = total_sep_test_correct / total_sep_test_samples
             avg_sep_test_loss = total_sep_test_loss / total_sep_test_samples
 
-            if self.args.enable_wandb:
-                wandb.log({"Server/SepTest/Acc": avg_sep_test_acc, "round": round_idx})
-                wandb.log({"Server/SepTest/Loss": avg_sep_test_loss, "round": round_idx})
+            wandb_metrics["Server/SepTest/Acc"] = avg_sep_test_acc
+            wandb_metrics["Server/SepTest/Loss"] = avg_sep_test_loss
+            mlops_metrics["Server/SepTest/Acc"] = avg_sep_test_acc
+            mlops_metrics["Server/SepTest/Loss"] = avg_sep_test_loss
 
-            mlops.log({"Server/SepTest/Acc": avg_sep_test_acc, "round": round_idx})
-            mlops.log({"Server/SepTest/Loss": avg_sep_test_loss, "round": round_idx})
+        # Single wandb.log call with all metrics
+        if self.args.enable_wandb:
+            wandb.log(wandb_metrics)
+
+        # Single mlops.log call with all metrics
+        mlops.log(mlops_metrics)
 
     def _count_model_parameters(self, model_params):
         """Count total number of parameters in the model"""
@@ -442,53 +445,66 @@ class ClusterAPI(object):
         """Log personal model metrics."""
         train_acc, train_loss, train_acc_std, train_loss_std = self._calculate_metrics_with_std(train_metrics)
 
-        if self.args.enable_wandb:
-            wandb.log({"Personal/Train/Acc": train_acc, "round": round_idx})
-            wandb.log({"Personal/Train/Loss": train_loss, "round": round_idx})
-            wandb.log({"Personal/Train/Acc/Std": train_acc_std, "round": round_idx})
-            wandb.log({"Personal/Train/Loss/Std": train_loss_std, "round": round_idx})
-
-        mlops.log({"Personal/Train/Acc": train_acc, "round": round_idx})
-        mlops.log({"Personal/Train/Loss": train_loss, "round": round_idx})
-        mlops.log({"Personal/Train/Acc/Std": train_acc_std, "round": round_idx})
-        mlops.log({"Personal/Train/Loss/Std": train_loss_std, "round": round_idx})
+        # Collect all metrics in dictionaries
+        wandb_metrics = {
+            "Personal/Train/Acc": train_acc,
+            "Personal/Train/Loss": train_loss,
+            "Personal/Train/Acc/Std": train_acc_std,
+            "Personal/Train/Loss/Std": train_loss_std,
+            "round": round_idx,
+        }
+        mlops_metrics = {
+            "Personal/Train/Acc": train_acc,
+            "Personal/Train/Loss": train_loss,
+            "Personal/Train/Acc/Std": train_acc_std,
+            "Personal/Train/Loss/Std": train_loss_std,
+            "round": round_idx,
+        }
 
         logging.info({"training_acc": train_acc, "training_loss": train_loss})
 
         if test_metrics["num_samples"]:
             test_acc, test_loss, test_acc_std, test_loss_std = self._calculate_metrics_with_std(test_metrics)
 
-            if self.args.enable_wandb:
-                wandb.log({"Personal/Test/Acc": test_acc, "round": round_idx})
-                wandb.log({"Personal/Test/Loss": test_loss, "round": round_idx})
-                wandb.log({"Personal/Test/Acc/Std": test_acc_std, "round": round_idx})
-                wandb.log({"Personal/Test/Loss/Std": test_loss_std, "round": round_idx})
+            # Add test metrics to the dictionaries
+            wandb_metrics["Personal/Test/Acc"] = test_acc
+            wandb_metrics["Personal/Test/Loss"] = test_loss
+            wandb_metrics["Personal/Test/Acc/Std"] = test_acc_std
+            wandb_metrics["Personal/Test/Loss/Std"] = test_loss_std
 
-            mlops.log({"Personal/Test/Acc": test_acc, "round": round_idx})
-            mlops.log({"Personal/Test/Loss": test_loss, "round": round_idx})
-            mlops.log({"Personal/Test/Acc/Std": test_acc_std, "round": round_idx})
-            mlops.log({"Personal/Test/Loss/Std": test_loss_std, "round": round_idx})
+            mlops_metrics["Personal/Test/Acc"] = test_acc
+            mlops_metrics["Personal/Test/Loss"] = test_loss
+            mlops_metrics["Personal/Test/Acc/Std"] = test_acc_std
+            mlops_metrics["Personal/Test/Loss/Std"] = test_loss_std
 
             logging.info({"test_acc": test_acc, "test_loss": test_loss})
 
+        # Single wandb.log and mlops.log calls
+        if self.args.enable_wandb:
+            wandb.log(wandb_metrics)
+        mlops.log(mlops_metrics)
+
     def _log_cluster_metrics(self, cluster_train_metrics, cluster_test_metrics, round_idx):
         """Log cluster model metrics for each group."""
+        # Collect all metrics in dictionaries
+        wandb_metrics = {"round": round_idx}
+        mlops_metrics = {"round": round_idx}
+
         for group_idx in self.group_dict.keys():
             # Train metrics
             train_acc, train_loss, train_acc_std, train_loss_std = self._calculate_metrics_with_std(
                 cluster_train_metrics[group_idx]
             )
 
-            if self.args.enable_wandb:
-                wandb.log({f"Cluster/Group_{group_idx}/Train/Acc": train_acc, "round": round_idx})
-                wandb.log({f"Cluster/Group_{group_idx}/Train/Loss": train_loss, "round": round_idx})
-                wandb.log({f"Cluster/Group_{group_idx}/Train/Acc/Std": train_acc_std, "round": round_idx})
-                wandb.log({f"Cluster/Group_{group_idx}/Train/Loss/Std": train_loss_std, "round": round_idx})
+            wandb_metrics[f"Cluster/Group_{group_idx}/Train/Acc"] = train_acc
+            wandb_metrics[f"Cluster/Group_{group_idx}/Train/Loss"] = train_loss
+            wandb_metrics[f"Cluster/Group_{group_idx}/Train/Acc/Std"] = train_acc_std
+            wandb_metrics[f"Cluster/Group_{group_idx}/Train/Loss/Std"] = train_loss_std
 
-            mlops.log({f"Cluster/Group_{group_idx}/Train/Acc": train_acc, "round": round_idx})
-            mlops.log({f"Cluster/Group_{group_idx}/Train/Loss": train_loss, "round": round_idx})
-            mlops.log({f"Cluster/Group_{group_idx}/Train/Acc/Std": train_acc_std, "round": round_idx})
-            mlops.log({f"Cluster/Group_{group_idx}/Train/Loss/Std": train_loss_std, "round": round_idx})
+            mlops_metrics[f"Cluster/Group_{group_idx}/Train/Acc"] = train_acc
+            mlops_metrics[f"Cluster/Group_{group_idx}/Train/Loss"] = train_loss
+            mlops_metrics[f"Cluster/Group_{group_idx}/Train/Acc/Std"] = train_acc_std
+            mlops_metrics[f"Cluster/Group_{group_idx}/Train/Loss/Std"] = train_loss_std
 
             # Test metrics
             if cluster_test_metrics[group_idx]["num_samples"]:
@@ -496,16 +512,20 @@ class ClusterAPI(object):
                     cluster_test_metrics[group_idx]
                 )
 
-                if self.args.enable_wandb:
-                    wandb.log({f"Cluster/Group_{group_idx}/Test/Acc": test_acc, "round": round_idx})
-                    wandb.log({f"Cluster/Group_{group_idx}/Test/Loss": test_loss, "round": round_idx})
-                    wandb.log({f"Cluster/Group_{group_idx}/Test/Acc/Std": test_acc_std, "round": round_idx})
-                    wandb.log({f"Cluster/Group_{group_idx}/Test/Loss/Std": test_loss_std, "round": round_idx})
+                wandb_metrics[f"Cluster/Group_{group_idx}/Test/Acc"] = test_acc
+                wandb_metrics[f"Cluster/Group_{group_idx}/Test/Loss"] = test_loss
+                wandb_metrics[f"Cluster/Group_{group_idx}/Test/Acc/Std"] = test_acc_std
+                wandb_metrics[f"Cluster/Group_{group_idx}/Test/Loss/Std"] = test_loss_std
 
-                mlops.log({f"Cluster/Group_{group_idx}/Test/Acc": test_acc, "round": round_idx})
-                mlops.log({f"Cluster/Group_{group_idx}/Test/Loss": test_loss, "round": round_idx})
-                mlops.log({f"Cluster/Group_{group_idx}/Test/Acc/Std": test_acc_std, "round": round_idx})
-                mlops.log({f"Cluster/Group_{group_idx}/Test/Loss/Std": test_loss_std, "round": round_idx})
+                mlops_metrics[f"Cluster/Group_{group_idx}/Test/Acc"] = test_acc
+                mlops_metrics[f"Cluster/Group_{group_idx}/Test/Loss"] = test_loss
+                mlops_metrics[f"Cluster/Group_{group_idx}/Test/Acc/Std"] = test_acc_std
+                mlops_metrics[f"Cluster/Group_{group_idx}/Test/Loss/Std"] = test_loss_std
+
+        # Single wandb.log and mlops.log calls
+        if self.args.enable_wandb:
+            wandb.log(wandb_metrics)
+        mlops.log(mlops_metrics)
 
     def _log_server_metrics(self, cluster_train_metrics, cluster_test_metrics, round_idx):
         """Log server-level metrics (aggregated across all clusters)."""
@@ -529,28 +549,36 @@ class ClusterAPI(object):
                 server_test_total_correct += sum(cluster_test_metrics[group_idx]["num_correct"])
                 server_test_total_loss += sum(cluster_test_metrics[group_idx]["losses"])
 
-        # Log train metrics
+        # Calculate train metrics
         server_train_acc = server_train_total_correct / server_train_total_samples
         server_train_loss = server_train_total_loss / server_train_total_samples
 
-        if self.args.enable_wandb:
-            wandb.log({"Server/Train/Acc": server_train_acc, "round": round_idx})
-            wandb.log({"Server/Train/Loss": server_train_loss, "round": round_idx})
+        # Collect all metrics in dictionaries
+        wandb_metrics = {
+            "Server/Train/Acc": server_train_acc,
+            "Server/Train/Loss": server_train_loss,
+            "round": round_idx,
+        }
+        mlops_metrics = {
+            "Server/Train/Acc": server_train_acc,
+            "Server/Train/Loss": server_train_loss,
+            "round": round_idx,
+        }
 
-        mlops.log({"Server/Train/Acc": server_train_acc, "round": round_idx})
-        mlops.log({"Server/Train/Loss": server_train_loss, "round": round_idx})
-
-        # Log test metrics if available
+        # Add test metrics if available
         if server_test_total_samples > 0:
             server_test_acc = server_test_total_correct / server_test_total_samples
             server_test_loss = server_test_total_loss / server_test_total_samples
 
-            if self.args.enable_wandb:
-                wandb.log({"Server/Test/Acc": server_test_acc, "round": round_idx})
-                wandb.log({"Server/Test/Loss": server_test_loss, "round": round_idx})
+            wandb_metrics["Server/Test/Acc"] = server_test_acc
+            wandb_metrics["Server/Test/Loss"] = server_test_loss
+            mlops_metrics["Server/Test/Acc"] = server_test_acc
+            mlops_metrics["Server/Test/Loss"] = server_test_loss
 
-            mlops.log({"Server/Test/Acc": server_test_acc, "round": round_idx})
-            mlops.log({"Server/Test/Loss": server_test_loss, "round": round_idx})
+        # Single wandb.log and mlops.log calls
+        if self.args.enable_wandb:
+            wandb.log(wandb_metrics)
+        mlops.log(mlops_metrics)
 
     def _local_test_on_all_clients(self, round_idx):
         logging.info("################local_test_on_all_clients : {}".format(round_idx))
@@ -590,6 +618,10 @@ class ClusterAPI(object):
         total_upload_cost = 0  # Total client to server
         total_download_cost = 0  # Total server to client
 
+        # Collect all metrics in dictionaries
+        wandb_metrics = {"round": round_idx}
+        mlops_metrics = {"round": round_idx}
+
         # Log communication costs for participating clients in this group
         for client_idx in participating_client_indexes:
             # Participating client
@@ -600,32 +632,33 @@ class ClusterAPI(object):
 
             client_total = client_upload + client_download
 
-            if self.args.enable_wandb:
-                wandb.log({f"CommCost/Group_{group_idx}/Client_{client_idx}/Upload": client_upload, "round": round_idx})
-                wandb.log(
-                    {f"CommCost/Group_{group_idx}/Client_{client_idx}/Download": client_download, "round": round_idx}
-                )
-                wandb.log({f"CommCost/Group_{group_idx}/Client_{client_idx}/Total": client_total, "round": round_idx})
+            wandb_metrics[f"CommCost/Group_{group_idx}/Client_{client_idx}/Upload"] = client_upload
+            wandb_metrics[f"CommCost/Group_{group_idx}/Client_{client_idx}/Download"] = client_download
+            wandb_metrics[f"CommCost/Group_{group_idx}/Client_{client_idx}/Total"] = client_total
 
-            mlops.log({f"CommCost/Group_{group_idx}/Client_{client_idx}/Upload": client_upload, "round": round_idx})
-            mlops.log({f"CommCost/Group_{group_idx}/Client_{client_idx}/Download": client_download, "round": round_idx})
-            mlops.log({f"CommCost/Group_{group_idx}/Client_{client_idx}/Total": client_total, "round": round_idx})
+            mlops_metrics[f"CommCost/Group_{group_idx}/Client_{client_idx}/Upload"] = client_upload
+            mlops_metrics[f"CommCost/Group_{group_idx}/Client_{client_idx}/Download"] = client_download
+            mlops_metrics[f"CommCost/Group_{group_idx}/Client_{client_idx}/Total"] = client_total
 
-        # Log total costs for the group in this round
+        # Add total costs for the group in this round
         total_round_cost = total_upload_cost + total_download_cost
 
-        if self.args.enable_wandb:
-            wandb.log({f"CommCost/Group_{group_idx}/Total/Upload": total_upload_cost, "round": round_idx})
-            wandb.log({f"CommCost/Group_{group_idx}/Total/Download": total_download_cost, "round": round_idx})
-            wandb.log({f"CommCost/Group_{group_idx}/Total/Combined": total_round_cost, "round": round_idx})
-            wandb.log({f"CommCost/Group_{group_idx}/ModelSize/Bits": model_size_bits, "round": round_idx})
-            wandb.log({f"CommCost/Group_{group_idx}/ModelSize/Parameters": total_params, "round": round_idx})
+        wandb_metrics[f"CommCost/Group_{group_idx}/Total/Upload"] = total_upload_cost
+        wandb_metrics[f"CommCost/Group_{group_idx}/Total/Download"] = total_download_cost
+        wandb_metrics[f"CommCost/Group_{group_idx}/Total/Combined"] = total_round_cost
+        wandb_metrics[f"CommCost/Group_{group_idx}/ModelSize/Bits"] = model_size_bits
+        wandb_metrics[f"CommCost/Group_{group_idx}/ModelSize/Parameters"] = total_params
 
-        mlops.log({f"CommCost/Group_{group_idx}/Total/Upload": total_upload_cost, "round": round_idx})
-        mlops.log({f"CommCost/Group_{group_idx}/Total/Download": total_download_cost, "round": round_idx})
-        mlops.log({f"CommCost/Group_{group_idx}/Total/Combined": total_round_cost, "round": round_idx})
-        mlops.log({f"CommCost/Group_{group_idx}/ModelSize/Bits": model_size_bits, "round": round_idx})
-        mlops.log({f"CommCost/Group_{group_idx}/ModelSize/Parameters": total_params, "round": round_idx})
+        mlops_metrics[f"CommCost/Group_{group_idx}/Total/Upload"] = total_upload_cost
+        mlops_metrics[f"CommCost/Group_{group_idx}/Total/Download"] = total_download_cost
+        mlops_metrics[f"CommCost/Group_{group_idx}/Total/Combined"] = total_round_cost
+        mlops_metrics[f"CommCost/Group_{group_idx}/ModelSize/Bits"] = model_size_bits
+        mlops_metrics[f"CommCost/Group_{group_idx}/ModelSize/Parameters"] = total_params
+
+        # Single wandb.log and mlops.log calls
+        if self.args.enable_wandb:
+            wandb.log(wandb_metrics)
+        mlops.log(mlops_metrics)
 
         logging.info(
             f"Communication costs - Round {round_idx}, Group {group_idx}: Total Upload={total_upload_cost} bits, Total Download={total_download_cost} bits, Combined={total_round_cost} bits"

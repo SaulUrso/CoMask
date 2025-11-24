@@ -174,7 +174,9 @@ class PruneClusterAPI(ClusterAPI):
                             mask_proposal = self._generate_client_mask_proposal(group_idx, client_idx)
                             if mask_proposal is not None:
                                 self.cluster_mask_proposals[group_idx][client_idx] = mask_proposal
-                                logging.info(f"Client {client_idx} in cluster {group_idx} proposed a mask before training")
+                                logging.info(
+                                    f"Client {client_idx} in cluster {group_idx} proposed a mask before training"
+                                )
 
                     # train on new dataset
                     mlops.event("train", event_started=True, event_value="{}_{}".format(str(round_idx), str(idx)))
@@ -382,8 +384,6 @@ class PruneClusterAPI(ClusterAPI):
         # Collect all mask proposals for this cluster
         mask_proposals = list(self.cluster_mask_proposals[group_idx].values())
 
-
-
         if self.cluster_first_prune_units[group_idx] is not None:
             consolidation_param = self.cluster_first_prune_units[group_idx]
             logging.info(f"Using {consolidation_param} units for mask voting in cluster {group_idx}")
@@ -496,6 +496,10 @@ class PruneClusterAPI(ClusterAPI):
 
         sep_test_loader = getattr(self.args, "sep_test_loader", None)
 
+        # Collect all metrics in a single dictionary for wandb
+        wandb_metrics = {"round": round_idx}
+        mlops_metrics = {"round": round_idx}
+
         # Evaluate each group's model separately
         for group_idx, group_w in self.w_groups.items():
             # Set model to current group's weights
@@ -512,13 +516,11 @@ class PruneClusterAPI(ClusterAPI):
             total_test_samples += test_metrics["test_total"]
             total_test_loss += test_metrics["test_loss"]
 
-            # Log individual group metrics
-            if self.args.enable_wandb:
-                wandb.log({f"Server/Group_{group_idx}/FullTest/Acc": test_acc, "round": round_idx})
-                wandb.log({f"Server/Group_{group_idx}/FullTest/Loss": test_loss, "round": round_idx})
-
-            mlops.log({f"Server/Group_{group_idx}/FullTest/Acc": test_acc, "round": round_idx})
-            mlops.log({f"Server/Group_{group_idx}/FullTest/Loss": test_loss, "round": round_idx})
+            # Add individual group metrics to batch
+            wandb_metrics[f"Server/Group_{group_idx}/FullTest/Acc"] = test_acc
+            wandb_metrics[f"Server/Group_{group_idx}/FullTest/Loss"] = test_loss
+            mlops_metrics[f"Server/Group_{group_idx}/FullTest/Acc"] = test_acc
+            mlops_metrics[f"Server/Group_{group_idx}/FullTest/Loss"] = test_loss
 
             if sep_test_loader is not None:
                 sep_test_metrics = self.model_trainer.test(sep_test_loader, self.device, self.args)
@@ -530,33 +532,34 @@ class PruneClusterAPI(ClusterAPI):
                 total_sep_test_samples += sep_test_metrics["test_total"]
                 total_sep_test_loss += sep_test_metrics["test_loss"]
 
-                # Log individual group metrics for separate test
-                if self.args.enable_wandb:
-                    wandb.log({f"Server/Group_{group_idx}/SepTest/Acc": sep_test_acc, "round": round_idx})
-                    wandb.log({f"Server/Group_{group_idx}/SepTest/Loss": sep_test_loss, "round": round_idx})
+                # Add individual group metrics for separate test to batch
+                wandb_metrics[f"Server/Group_{group_idx}/SepTest/Acc"] = sep_test_acc
+                wandb_metrics[f"Server/Group_{group_idx}/SepTest/Loss"] = sep_test_loss
+                mlops_metrics[f"Server/Group_{group_idx}/SepTest/Acc"] = sep_test_acc
+                mlops_metrics[f"Server/Group_{group_idx}/SepTest/Loss"] = sep_test_loss
 
-                mlops.log({f"Server/Group_{group_idx}/SepTest/Acc": sep_test_acc, "round": round_idx})
-                mlops.log({f"Server/Group_{group_idx}/SepTest/Loss": sep_test_loss, "round": round_idx})
-
-        # Calculate and log aggregate statistics across all groups
+        # Calculate and add aggregate statistics across all groups
         avg_test_acc = total_test_correct / total_test_samples
         avg_test_loss = total_test_loss / total_test_samples
 
-        if self.args.enable_wandb:
-            wandb.log({"Server/FullTest/Acc": avg_test_acc, "round": round_idx})
-            wandb.log({"Server/FullTest/Loss": avg_test_loss, "round": round_idx})
-
-        mlops.log({"Server/FullTest/Acc": avg_test_acc, "round": round_idx})
-        mlops.log({"Server/FullTest/Loss": avg_test_loss, "round": round_idx})
+        wandb_metrics["Server/FullTest/Acc"] = avg_test_acc
+        wandb_metrics["Server/FullTest/Loss"] = avg_test_loss
+        mlops_metrics["Server/FullTest/Acc"] = avg_test_acc
+        mlops_metrics["Server/FullTest/Loss"] = avg_test_loss
 
         if sep_test_loader is not None:
-            # Calculate and log aggregate statistics across all groups
+            # Calculate and add aggregate statistics for separate test
             avg_sep_test_acc = total_sep_test_correct / total_sep_test_samples
             avg_sep_test_loss = total_sep_test_loss / total_sep_test_samples
 
-            if self.args.enable_wandb:
-                wandb.log({"Server/SepTest/Acc": avg_sep_test_acc, "round": round_idx})
-                wandb.log({"Server/SepTest/Loss": avg_sep_test_loss, "round": round_idx})
+            wandb_metrics["Server/SepTest/Acc"] = avg_sep_test_acc
+            wandb_metrics["Server/SepTest/Loss"] = avg_sep_test_loss
+            mlops_metrics["Server/SepTest/Acc"] = avg_sep_test_acc
+            mlops_metrics["Server/SepTest/Loss"] = avg_sep_test_loss
 
-            mlops.log({"Server/SepTest/Acc": avg_sep_test_acc, "round": round_idx})
-            mlops.log({"Server/SepTest/Loss": avg_sep_test_loss, "round": round_idx})
+        # Single wandb.log call with all metrics
+        if self.args.enable_wandb:
+            wandb.log(wandb_metrics)
+
+        # Single mlops.log call with all metrics
+        mlops.log(mlops_metrics)
