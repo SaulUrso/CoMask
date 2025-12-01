@@ -98,7 +98,7 @@ def _aggregate_basic_conv2d(aggregated_block, models, masks, weights, mask_key, 
     # Aggregate from each model
     for model, mask_dict, weight in zip(models, masks, weights):
         if mask_key not in mask_dict:
-            continue
+            raise ValueError(f"Mask key '{mask_key}' not found in mask_dict for client with weight {weight}.")
 
         kept_indices = mask_dict[mask_key]["indices_kept"]
 
@@ -232,7 +232,6 @@ def _aggregate_depth_separable_conv2d(aggregated_block, models, masks, weights, 
                 depthwise_bn_running_var_sum[original_in_idx] += weight * model_depthwise_bn.running_var[pruned_in_idx]
                 depthwise_bn_count[original_in_idx] += weight
         else:
-
             raise ValueError(f"prev_kept_indices is {None}, but layer {block_name} is not the first one.saul")
             # First layer - all input channels present
             # This shouldn't happen as stem.0 is BasicConv2d
@@ -356,7 +355,7 @@ def _aggregate_linear_layer(aggregated_linear, models, masks, weights):
         # The last layer before fc is conv4.1 (second DepthSeparableConv2d in conv4)
         last_conv_mask_key = "conv4.1.pointwise.0"
         if last_conv_mask_key not in mask_dict:
-            continue
+            raise ValueError(f"Mask key '{last_conv_mask_key}' not found in mask_dict for client with weight {weight}.")
 
         last_conv_kept_indices = mask_dict[last_conv_mask_key]["indices_kept"]
         model_linear = model.fc
@@ -427,8 +426,6 @@ def _get_previous_layer_indices(current_layer_name, mask_dict):
             # Previous block in same group
             prev_key = f"{block_name}.{block_idx - 1}.pointwise.0"
 
-    if prev_key in mask_dict:
-        return mask_dict[prev_key]["indices_kept"]
-    else:
-        # If mask not found, assume all channels are kept
-        return None
+    if prev_key not in mask_dict:
+        raise ValueError(f"Previous layer mask key '{prev_key}' not found in mask_dict.")
+    return mask_dict[prev_key]["indices_kept"]

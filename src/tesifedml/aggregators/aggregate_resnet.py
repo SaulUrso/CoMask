@@ -237,20 +237,24 @@ def _aggregate_conv_bn(
     # Aggregate from each model
     for model, mask_dict, weight in zip(models, masks, weights):
         if mask_key not in mask_dict:
-            continue
+            raise ValueError(f"Mask key '{mask_key}' not found in mask_dict for client with weight {weight}.")
 
         kept_indices = mask_dict[mask_key]["indices_kept"]
 
         # Get previous layer's kept indices for input channel mapping
         prev_kept_indices = None
-        if prev_mask_key is not None and prev_mask_key in mask_dict:
+        if prev_mask_key is not None:
+            if prev_mask_key not in mask_dict:
+                raise ValueError(
+                    f"Previous mask key '{prev_mask_key}' not found in mask_dict for client with weight {weight}."
+                )
             prev_kept_indices = mask_dict[prev_mask_key]["indices_kept"]
 
         # Navigate to the corresponding layer in the pruned model
         model_conv, model_bn = _get_conv_bn_from_model(model, mask_key)
 
         if model_conv is None or model_bn is None:
-            continue
+            raise ValueError(f"Could not find conv/bn layers for mask_key '{mask_key}' in model.")
 
         # Aggregate each kept filter
         for pruned_idx, original_idx in enumerate(kept_indices):
@@ -371,13 +375,19 @@ def _aggregate_downsample(
     # Aggregate from each model
     for model, mask_dict, weight in zip(models, masks, weights):
         if output_mask_key not in mask_dict:
-            continue
+            raise ValueError(
+                f"Output mask key '{output_mask_key}' not found in mask_dict for client with weight {weight}."
+            )
 
         output_kept_indices = mask_dict[output_mask_key]["indices_kept"]
 
         # Get input layer's kept indices
         input_kept_indices = None
-        if input_mask_key is not None and input_mask_key in mask_dict:
+        if input_mask_key is not None:
+            if input_mask_key not in mask_dict:
+                raise ValueError(
+                    f"Input mask key '{input_mask_key}' not found in mask_dict for client with weight {weight}."
+                )
             input_kept_indices = mask_dict[input_mask_key]["indices_kept"]
 
         # Navigate to the downsample layer in the pruned model

@@ -90,8 +90,7 @@ def _aggregate_conv_block(aggregated_conv, aggregated_bn, models, masks, weights
 
     # Aggregate from each model
     for model, mask_dict, weight in zip(models, masks, weights):
-        if mask_key not in mask_dict:
-            continue
+        assert mask_key in mask_dict
 
         kept_indices = mask_dict[mask_key]["indices_kept"]
 

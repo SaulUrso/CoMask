@@ -124,7 +124,7 @@ class PruningTrainerAPI(FedAvgAPI):
         for client_idx in range(self.args.client_num_in_total):
             self.client_prune_counters[client_idx] = prune_counter_default
             self.client_masks[client_idx] = None
-            self.client_pruned_models[client_idx] = None
+            self.client_pruned_models[client_idx] = copy.deepcopy(self.model)
 
         for client_idx in range(self.args.client_num_per_round):
             c = PruneClient(
@@ -161,6 +161,7 @@ class PruningTrainerAPI(FedAvgAPI):
             w_locals = []
             masks_locals = []
             counters_locals = []
+            pruned_this_round = {}  # Track which clients pruned this round and their model sizes before/after
 
             for idx, client_idx in enumerate(client_indexes):
                 client = self.client_list[idx]
@@ -177,9 +178,18 @@ class PruningTrainerAPI(FedAvgAPI):
                 should_prune = self._should_client_prune(client_idx, round_idx)
 
                 if should_prune:
+                    # Record model size before pruning for communication cost calculation
+                    model_size_before = self._count_model_parameters(self.client_pruned_models[client_idx].state_dict())  # type: ignore
                     # Client prunes immediately before training
                     logging.info(f"Client {client_idx} pruning at round {round_idx}")
                     self._prune_client_model(client_idx)
+
+                    # Record model size after pruning
+                    model_size_after = self._count_model_parameters(self.client_pruned_models[client_idx].state_dict())  # type: ignore
+                    pruned_this_round[client_idx] = {
+                        "before": model_size_before,
+                        "after": model_size_after,
+                    }
 
                 # Update client's model trainer to use the correct structure (pruned or full)
                 self._update_client_model_structure(client, client_idx)
@@ -208,7 +218,7 @@ class PruningTrainerAPI(FedAvgAPI):
             # self.model_trainer.model = self.model
 
             mlops.event("agg", event_started=True, event_value=str(round_idx))
-            w_global = self._aggregate_with_masks(w_locals, masks_locals, counters_locals)
+            w_global = self._aggregate_with_masks(w_locals, masks_locals, counters_locals, client_indexes)
             self.model_trainer.set_model_params(w_global)
             mlops.event("agg", event_started=False, event_value=str(round_idx))
 
@@ -220,6 +230,9 @@ class PruningTrainerAPI(FedAvgAPI):
                 self._test_server(round_idx)
 
             mlops.log_round_info(self.args.comm_round, round_idx)
+
+            # Log communication costs
+            self._log_communication_cost(round_idx, client_indexes, pruned_this_round)
 
         mlops.log_training_finished_status()
         mlops.log_aggregation_finished_status()
@@ -243,17 +256,14 @@ class PruningTrainerAPI(FedAvgAPI):
 
         # Evaluate on validation set
         val_loader = self.val_data_local_dict[client_idx]
-        if val_loader is None:
-            logging.warning(f"Client {client_idx} has no validation data, skipping pruning check")
-            return False
+        assert val_loader is not None
 
         # Get client's current model for evaluation
         client_train_weights = self._get_client_training_weights(client_idx, self.model_trainer.get_model_params())
 
         # Temporarily update model structure for evaluation
         original_model = self.model_trainer.model
-        if self.client_pruned_models[client_idx] is not None:
-            self.model_trainer.model = self.client_pruned_models[client_idx]
+        self.model_trainer.model = self.client_pruned_models[client_idx]
 
         # Set model and evaluate
         self.model_trainer.set_model_params(client_train_weights)
@@ -268,11 +278,11 @@ class PruningTrainerAPI(FedAvgAPI):
         # Restore original model structure
         self.model_trainer.model = original_model
 
-        if val_acc < threshold: #TODO: change this, only kept this way for testing
-            logging.info(f"Client {client_idx} validation accuracy {val_acc:.4f} < threshold {threshold}, will prune")
+        if val_acc >= threshold:
+            logging.info(f"Client {client_idx} validation accuracy {val_acc:.4f} >= threshold {threshold}, will prune")
             return True
         else:
-            logging.info(f"Client {client_idx} validation accuracy {val_acc:.4f} >= threshold {threshold}, no pruning")
+            logging.info(f"Client {client_idx} validation accuracy {val_acc:.4f} < threshold {threshold}, pruning")
             return False
 
     def _prune_client_model(self, client_idx: int):
@@ -286,7 +296,7 @@ class PruningTrainerAPI(FedAvgAPI):
         client_train_weights = self._get_client_training_weights(client_idx, self.model_trainer.get_model_params())
 
         # Create temporary model for pruning
-        temp_model = copy.deepcopy(self.model).cpu()
+        temp_model = copy.deepcopy(self.client_pruned_models[client_idx]).cpu()  # type: ignore
         temp_model.load_state_dict(client_train_weights)
 
         # Read pruning parameters
@@ -388,6 +398,7 @@ class PruningTrainerAPI(FedAvgAPI):
         w_locals: List[tuple],  # List of (sample_num, weights) tuples
         masks_locals: List[Optional[Dict]],
         counters_locals: List[int],
+        client_indexes: List[int],
     ) -> Dict:
         """
         Aggregate client models using unified_aggregate.
@@ -397,34 +408,28 @@ class PruningTrainerAPI(FedAvgAPI):
         # Extract just the weights from the tuples
         weights_only = [w for _, w in w_locals]
 
+        # Handle case where all clients have no masks (no pruning yet)
+        if all(m is None for m in masks_locals):
+            # Use standard weighted averaging from parent class
+            return self._aggregate(w_locals)
+
+        # Find a reference mask from a client that has been pruned
+        reference_mask = None
+        for mask in masks_locals:
+            if mask is not None:
+                reference_mask = mask
+                break
+
         # Build models from state dicts
         models = []
         masks = []
         counters = []
 
-        for w, mask, counter in zip(weights_only, masks_locals, counters_locals):
-            # Create model instance
-            model = copy.deepcopy(self.model).cpu()
-
-            # If client has a mask, we need to create the pruned model structure
+        for w, mask, counter, client_idx in zip(weights_only, masks_locals, counters_locals, client_indexes):
+            # If client has a mask, use the already stored pruned model structure
             if mask is not None:
-                # Apply mask to get the pruned model structure
-                prune_way = getattr(self.args, "prune_way", "group_lasso")
-                minimum_channels = getattr(self.args, "minimum_channels", 1)
-                divisor = getattr(self.args, "divisor", 1)
-                prune_percent = self.args.prune_percent
-
-                temp_model = copy.deepcopy(self.model).cpu()
-                temp_model.load_state_dict(self.model_trainer.get_model_params())
-
-                pruned_model, _, _, _, _, _ = prune_model(
-                    temp_model,
-                    percent=prune_percent,
-                    prune_way=prune_way,
-                    minimum_channels=minimum_channels,
-                    divisor=divisor,
-                    with_mask=mask,
-                )
+                # Use the already pruned model structure stored for this client
+                pruned_model = copy.deepcopy(self.client_pruned_models[client_idx]).cpu()  # type: ignore
 
                 # Load client's trained weights into pruned structure
                 pruned_model.load_state_dict(w)
@@ -432,91 +437,44 @@ class PruningTrainerAPI(FedAvgAPI):
                 masks.append(mask)
             else:
                 # Client has full model
+                model = copy.deepcopy(self.model).cpu()
                 model.load_state_dict(w)
                 models.append(model)
-                # Create identity mask (all filters kept)
-                masks.append(None)
+                # Create identity mask based on reference mask structure
+                masks.append(self._create_identity_mask_from_reference(reference_mask))  # type: ignore
 
             counters.append(counter)
-
-        # Handle case where all clients have no masks (no pruning yet)
-        if all(m is None for m in masks):
-            # Use standard weighted averaging from parent class
-            return self._aggregate(w_locals)
-
-        # Replace None masks with identity masks for aggregation
-        for i, mask in enumerate(masks):
-            if mask is None:
-                masks[i] = self._create_identity_mask(models[i])
 
         # Aggregate using unified_aggregate
         aggregated_model = aggregate_model(models, masks, counters)
 
         return aggregated_model.state_dict()
 
-    def _create_identity_mask(self, model: nn.Module) -> Dict:
+    def _create_identity_mask_from_reference(self, reference_mask: Dict) -> Dict:
         """
-        Create an identity mask (all filters kept) for a model.
+        Create an identity mask (all filters kept) based on a reference mask structure.
 
-        This is used when a client hasn't been pruned yet but we need a mask
-        for the unified aggregation function.
+        This uses the original_filters from each layer in the reference mask to create
+        a mask where all filters are kept. This approach is model-agnostic.
+
+        Args:
+            reference_mask: A mask dictionary from a pruned client to use as structure reference
+
+        Returns:
+            An identity mask with the same layer structure but all filters kept
         """
         identity_mask = {}
 
-        # Determine model type and create appropriate masks
-        from fedml.model.cv.resnet_cifar import ResNet
+        for layer_name, mask_info in reference_mask.items():
+            original_filters = mask_info["original_filters"]
 
-        from tesifedml.models.cnn import HARBox_CNN
-        from tesifedml.models.mobilenet import MobileNet
-
-        if isinstance(model, HARBox_CNN):
-            # HARBox_CNN has conv1 and conv2
-            for layer_idx in range(2):
-                conv_name = f"conv{layer_idx + 1}"
-                conv_seq = getattr(model, conv_name)
-                conv_layer = conv_seq[0]
-                num_filters = conv_layer.out_channels
-
-                mask_key = f"conv_{layer_idx}"
-                identity_mask[mask_key] = {
-                    "mask": torch.ones(num_filters),
-                    "layer_type": "conv",
-                    "original_filters": num_filters,
-                    "pruned_filters": num_filters,
-                    "indices_kept": np.arange(num_filters),
-                }
-        elif isinstance(model, MobileNet):
-            # MobileNet has multiple conv layers
-            layer_idx = 0
-            for name, module in model.named_modules():
-                if isinstance(module, nn.Conv2d) and "depthwise" not in name:
-                    num_filters = module.out_channels
-                    mask_key = f"conv_{layer_idx}"
-                    identity_mask[mask_key] = {
-                        "mask": torch.ones(num_filters),
-                        "layer_type": "conv",
-                        "original_filters": num_filters,
-                        "pruned_filters": num_filters,
-                        "indices_kept": np.arange(num_filters),
-                    }
-                    layer_idx += 1
-        elif isinstance(model, ResNet):
-            # ResNet has multiple layers
-            layer_idx = 0
-            for name, module in model.named_modules():
-                if isinstance(module, nn.Conv2d) and "downsample" not in name:
-                    num_filters = module.out_channels
-                    mask_key = f"conv_{layer_idx}"
-                    identity_mask[mask_key] = {
-                        "mask": torch.ones(num_filters),
-                        "layer_type": "conv",
-                        "original_filters": num_filters,
-                        "pruned_filters": num_filters,
-                        "indices_kept": np.arange(num_filters),
-                    }
-                    layer_idx += 1
-        else:
-            raise ValueError(f"Unsupported model type for identity mask creation: {type(model)}")
+            identity_mask[layer_name] = {
+                "mask": torch.ones(original_filters),
+                "layer_type": mask_info["layer_type"],
+                "original_filters": original_filters,
+                "pruned_filters": original_filters,
+                "indices_kept": np.arange(original_filters),
+            }
 
         return identity_mask
 
@@ -552,9 +510,9 @@ class PruningTrainerAPI(FedAvgAPI):
             if self.client_pruned_models[client_idx] is not None:
                 self.model_trainer.model = self.client_pruned_models[client_idx]
 
-            self.model_trainer.set_model_params(personal_weights)
-
+            self.model_trainer.set_model_params(self.client_weights[client_idx])
             train_local_metrics = client.local_test(False)
+
             train_metrics["num_samples"].append(copy.deepcopy(train_local_metrics["test_total"]))
             train_metrics["num_correct"].append(copy.deepcopy(train_local_metrics["test_correct"]))
             train_metrics["losses"].append(copy.deepcopy(train_local_metrics["test_loss"]))
@@ -566,13 +524,14 @@ class PruningTrainerAPI(FedAvgAPI):
                 test_metrics["losses"].append(copy.deepcopy(test_local_metrics["test_loss"]))
 
             # Restore original model structure and test global model
-            self.model_trainer.model = original_model
-            self.model_trainer.set_model_params(w_global)
+            self.model_trainer.set_model_params(personal_weights)
+            global_train_local_metrics = client.local_test(True)
 
-            global_train_local_metrics = client.local_test(False)
             global_train_metrics["num_samples"].append(copy.deepcopy(global_train_local_metrics["test_total"]))
             global_train_metrics["num_correct"].append(copy.deepcopy(global_train_local_metrics["test_correct"]))
             global_train_metrics["losses"].append(copy.deepcopy(global_train_local_metrics["test_loss"]))
+
+            self.model_trainer.model = original_model
 
         # Log personal (pruned) model metrics
         train_acc = sum(train_metrics["num_correct"]) / sum(train_metrics["num_samples"])
@@ -621,13 +580,89 @@ class PruningTrainerAPI(FedAvgAPI):
         ]
 
         if self.args.enable_wandb:
-            wandb.log({"Global/Train/Acc": global_train_acc, "round": round_idx})
-            wandb.log({"Global/Train/Loss": global_train_loss, "round": round_idx})
-            wandb.log({"Global/Train/Acc/Std": np.std(global_train_accs), "round": round_idx})
-            wandb.log({"Global/Train/Loss/Std": np.std(global_train_losses), "round": round_idx})
+            wandb.log({"Global/Test/Acc": global_train_acc, "round": round_idx})
+            wandb.log({"Global/Test/Loss": global_train_loss, "round": round_idx})
+            wandb.log({"Global/Test/Acc/Std": np.std(global_train_accs), "round": round_idx})
+            wandb.log({"Global/Test/Loss/Std": np.std(global_train_losses), "round": round_idx})
 
-        mlops.log({"Global/Train/Acc": global_train_acc, "round": round_idx})
-        mlops.log({"Global/Train/Loss": global_train_loss, "round": round_idx})
-        mlops.log({"Global/Train/Acc/Std": np.std(global_train_accs), "round": round_idx})
-        mlops.log({"Global/Train/Loss/Std": np.std(global_train_losses), "round": round_idx})
-        logging.info({"global_training_acc": global_train_acc, "global_training_loss": global_train_loss})
+        mlops.log({"Global/Test/Acc": global_train_acc, "round": round_idx})
+        mlops.log({"Global/Test/Loss": global_train_loss, "round": round_idx})
+        mlops.log({"Global/Test/Acc/Std": np.std(global_train_accs), "round": round_idx})
+        mlops.log({"Global/Test/Loss/Std": np.std(global_train_losses), "round": round_idx})
+        logging.info({"global_test_acc": global_train_acc, "global_test_loss": global_train_loss})
+
+    def _count_model_parameters(self, model_params):
+        """Count total number of parameters in the model"""
+        total_params = 0
+        for param_tensor in model_params.values():
+            total_params += param_tensor.numel()
+        return total_params
+
+    def _log_communication_cost(self, round_idx, participating_client_indexes, pruned_this_round):  # type: ignore
+        """
+        Log communication costs for all clients in the current round.
+
+        For clients that pruned this round:
+        - Download cost: based on the model size before pruning
+        - Upload cost: based on the model size after pruning
+
+        For clients that did not prune this round:
+        - Download and upload costs are the same (client's current local model size)
+
+        Args:
+            round_idx: Current communication round
+            participating_client_indexes: List of client indices that participated in this round
+            pruned_this_round: Dict mapping client_idx to {"before": size, "after": size} for clients that pruned
+        """
+        bits_per_param = 32
+
+        # Communication cost tracking for all clients
+        total_upload_cost = 0
+        total_download_cost = 0
+
+        for client_idx in range(self.args.client_num_in_total):
+            if client_idx in participating_client_indexes:
+                if client_idx in pruned_this_round:
+                    # Client pruned this round
+                    # Download cost: model size before pruning
+                    client_download = pruned_this_round[client_idx]["before"] * bits_per_param
+                    # Upload cost: model size after pruning
+                    client_upload = pruned_this_round[client_idx]["after"] * bits_per_param
+                else:
+                    # Client did not prune this round - use current local model size
+                    client_model_params = self._count_model_parameters(
+                        self.client_pruned_models[client_idx].state_dict()  # type: ignore
+                    )
+                    client_download = client_model_params * bits_per_param
+                    client_upload = client_model_params * bits_per_param
+
+                total_upload_cost += client_upload
+                total_download_cost += client_download
+
+                client_total = client_upload + client_download
+
+                if self.args.enable_wandb:
+                    wandb.log({f"CommCost/Client_{client_idx}/Upload": client_upload, "round": round_idx})
+                    wandb.log({f"CommCost/Client_{client_idx}/Download": client_download, "round": round_idx})
+                    wandb.log({f"CommCost/Client_{client_idx}/Total": client_total, "round": round_idx})
+
+                mlops.log({f"CommCost/Client_{client_idx}/Upload": client_upload, "round": round_idx})
+                mlops.log({f"CommCost/Client_{client_idx}/Download": client_download, "round": round_idx})
+                mlops.log({f"CommCost/Client_{client_idx}/Total": client_total, "round": round_idx})
+
+        # Log total costs for the round
+        total_round_cost = total_upload_cost + total_download_cost
+
+        if self.args.enable_wandb:
+            wandb.log({"CommCost/Total/Upload": total_upload_cost, "round": round_idx})
+            wandb.log({"CommCost/Total/Download": total_download_cost, "round": round_idx})
+            wandb.log({"CommCost/Total/Combined": total_round_cost, "round": round_idx})
+
+        mlops.log({"CommCost/Total/Upload": total_upload_cost, "round": round_idx})
+        mlops.log({"CommCost/Total/Download": total_download_cost, "round": round_idx})
+        mlops.log({"CommCost/Total/Combined": total_round_cost, "round": round_idx})
+
+        logging.info(
+            f"Communication costs - Round {round_idx}: Total Upload={total_upload_cost} bits, "
+            f"Total Download={total_download_cost} bits, Combined={total_round_cost} bits"
+        )
