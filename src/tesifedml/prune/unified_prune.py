@@ -1,6 +1,7 @@
 from ..models.cnn import HARBox_CNN
 from ..models.mobilenet import MobileNet
 from fedml.model.cv.resnet_cifar import ResNet
+from tesifedml.models.resnet_cifar import ResNet as ResNet2
 
 from . import prune_cnn_by_filter
 from . import prune_mobilenet_by_filter
@@ -30,7 +31,7 @@ def prune_model(model, percent, prune_way="mean_abs", minimum_channels=1, diviso
         return prune_mobilenet_by_filter.prune(
             model, percent, prune_way, minimum_channels, divisor, with_mask
         )
-    elif isinstance(model, ResNet):
+    elif isinstance(model, ResNet) or isinstance(model,ResNet2):
         return prune_resnet_by_filter.prune(
             model, percent, prune_way, minimum_channels, divisor, with_mask
         )
