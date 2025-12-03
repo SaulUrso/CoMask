@@ -45,6 +45,12 @@ class PruneClusterAPI(ClusterAPI):
         self.test_data_local_dict = test_data_local_dict
         self.client_weights = []
 
+        # Initialize wandb table for mask proposal events
+        if args.enable_wandb:
+            self.proposal_table = wandb.Table(columns=["round", "cluster_id", "client_id"])
+        else:
+            self.proposal_table = None
+
         logging.info("model = {}".format(model))
 
         if args.ssl_coefficient > 0.0:
@@ -97,6 +103,15 @@ class PruneClusterAPI(ClusterAPI):
 
         self.group_dict = group_to_client_indexes
 
+        # Log cluster sizes to wandb config for easy retrieval
+        if self.args.enable_wandb:
+            cluster_sizes = {
+                f"cluster_{group_idx}_num_clients": len(client_idxs)
+                for group_idx, client_idxs in group_to_client_indexes.items()
+            }
+            wandb.config.update(cluster_sizes)
+            logging.info(f"Logged cluster sizes to wandb config: {cluster_sizes}")
+
         for client_idx in range(self.args.client_num_per_round):
             c = PruneClient(
                 client_idx,
@@ -120,7 +135,8 @@ class PruneClusterAPI(ClusterAPI):
         for group_idx in self.group_dict.keys():
             self.cluster_models[group_idx] = copy.deepcopy(self.model)
             # Initialize pruning counters for each cluster (starts at 3)
-            self.cluster_prune_counters[group_idx] = 3
+            prune_counter = getattr(self.args, "prune_counter", 3)
+            self.cluster_prune_counters[group_idx] = prune_counter
             # Initialize mask proposal dictionaries for each cluster
             self.cluster_mask_proposals[group_idx] = {}
             # Initialize first pruning units tracker
@@ -177,6 +193,12 @@ class PruneClusterAPI(ClusterAPI):
                                 logging.info(
                                     f"Client {client_idx} in cluster {group_idx} proposed a mask before training"
                                 )
+                                # Log proposal event to wandb table
+                                if self.proposal_table is not None:
+                                    self.proposal_table.add_data(round_idx, group_idx, client_idx)
+                                    logging.info(
+                                        f"Logged proposal event: round={round_idx}, cluster={group_idx}, client={client_idx}"
+                                    )
 
                     # train on new dataset
                     mlops.event("train", event_started=True, event_value="{}_{}".format(str(round_idx), str(idx)))
@@ -232,6 +254,11 @@ class PruneClusterAPI(ClusterAPI):
 
         mlops.log_training_finished_status()
         mlops.log_aggregation_finished_status()
+
+        # Log the proposal events table to wandb at the end of training
+        if self.proposal_table is not None:
+            wandb.log({"mask_proposals": self.proposal_table})
+            logging.info("Logged mask proposal events table to wandb")
 
     def _prune_cluster_clients(self, group_idx: int, round_idx: int):
         """Apply random pruning mask to all client models in the specified cluster."""
@@ -315,7 +342,7 @@ class PruneClusterAPI(ClusterAPI):
         # Check if we have enough proposals for consensus
         total_clients_in_cluster = len(self.group_dict[group_idx])
         current_proposals = len(self.cluster_mask_proposals[group_idx])
-        required_proposals = int(total_clients_in_cluster * self.args.consensus_percentage)
+        required_proposals = max(int(total_clients_in_cluster * self.args.consensus_percentage), 1)
 
         if current_proposals >= required_proposals:
             logging.info(
