@@ -10,7 +10,7 @@ def aggregate_mobilenet_with_masks(
     models: List[nn.Module],
     masks: List[Dict],
     counters: List[int],
-    class_num: int = 100,
+    class_num: int = 62,
 ) -> nn.Module:
     """
     Aggregate multiple pruned MobileNet models using their pruning masks.

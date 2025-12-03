@@ -124,7 +124,8 @@ class PruningTrainerAPI(FedAvgAPI):
         for client_idx in range(self.args.client_num_in_total):
             self.client_prune_counters[client_idx] = prune_counter_default
             self.client_masks[client_idx] = None
-            self.client_pruned_models[client_idx] = copy.deepcopy(self.model)
+            # Keep client models on CPU
+            self.client_pruned_models[client_idx] = copy.deepcopy(self.model).cpu()
 
         for client_idx in range(self.args.client_num_per_round):
             c = PruneClient(
@@ -194,6 +195,9 @@ class PruningTrainerAPI(FedAvgAPI):
                 # Update client's model trainer to use the correct structure (pruned or full)
                 self._update_client_model_structure(client, client_idx)
 
+                # Move client's model to GPU for training
+                client.model_trainer.model = client.model_trainer.model.to(self.device)
+
                 # Get the client's training weights (for the correct structure)
                 client_train_weights = self._get_client_training_weights(client_idx, w_global)
 
@@ -201,6 +205,9 @@ class PruningTrainerAPI(FedAvgAPI):
                 mlops.event("train", event_started=True, event_value="{}_{}".format(str(round_idx), str(idx)))
                 w = client.train(copy.deepcopy(client_train_weights))
                 mlops.event("train", event_started=False, event_value="{}_{}".format(str(round_idx), str(idx)))
+
+                # Move model back to CPU after training
+                client.model_trainer.model = client.model_trainer.model.cpu()
 
                 # set back client's model trainer to use the full structure (necessary for next round)
                 self._update_client_model_structure(client, None)
@@ -261,9 +268,9 @@ class PruningTrainerAPI(FedAvgAPI):
         # Get client's current model for evaluation
         client_train_weights = self._get_client_training_weights(client_idx, self.model_trainer.get_model_params())
 
-        # Temporarily update model structure for evaluation
+        # Temporarily update model structure for evaluation and move to GPU
         original_model = self.model_trainer.model
-        self.model_trainer.model = self.client_pruned_models[client_idx]
+        self.model_trainer.model = self.client_pruned_models[client_idx].to(self.device)  # type: ignore
 
         # Set model and evaluate
         self.model_trainer.set_model_params(client_train_weights)
@@ -275,7 +282,8 @@ class PruningTrainerAPI(FedAvgAPI):
         val_acc = val_metrics["test_correct"] / test_total
         threshold = self.args.accuracy_threshold
 
-        # Restore original model structure
+        # Move model back to CPU and restore original model structure
+        self.model_trainer.model = self.model_trainer.model.cpu()
         self.model_trainer.model = original_model
 
         if val_acc >= threshold:
@@ -295,7 +303,7 @@ class PruningTrainerAPI(FedAvgAPI):
         # Get client's current model (might be already pruned)
         client_train_weights = self._get_client_training_weights(client_idx, self.model_trainer.get_model_params())
 
-        # Create temporary model for pruning
+        # Create temporary model for pruning (keep on CPU)
         temp_model = copy.deepcopy(self.client_pruned_models[client_idx]).cpu()  # type: ignore
         temp_model.load_state_dict(client_train_weights)
 
@@ -305,7 +313,7 @@ class PruningTrainerAPI(FedAvgAPI):
         divisor = getattr(self.args, "divisor", 1)
         prune_percent = self.args.prune_percent
 
-        # Prune the model
+        # Prune the model (pruning happens on CPU)
         pruned_model, param_ratio, group_ratio, threshold, new_mask, units_pruned = prune_model(
             temp_model,
             percent=prune_percent,
@@ -331,8 +339,8 @@ class PruningTrainerAPI(FedAvgAPI):
                 f"(param reduction: {param_ratio:.2%}, group reduction: {group_ratio:.2%})"
             )
 
-        # Store the pruned model structure for this client
-        self.client_pruned_models[client_idx] = pruned_model
+        # Store the pruned model structure for this client (keep on CPU)
+        self.client_pruned_models[client_idx] = pruned_model.cpu()
 
         # Decrement pruning counter
         self.client_prune_counters[client_idx] -= 1
@@ -348,13 +356,15 @@ class PruningTrainerAPI(FedAvgAPI):
 
         If the client has been pruned, update to use the pruned model structure.
         Otherwise, use the original full model structure.
+
+        Note: Model is kept on CPU, will be moved to GPU when needed for operations.
         """
         if client_idx is not None and self.client_pruned_models[client_idx] is not None:
-            # Client has been pruned, use pruned model structure
-            client.model_trainer.model = self.client_pruned_models[client_idx]
+            # Client has been pruned, use pruned model structure (keep on CPU)
+            client.model_trainer.model = copy.deepcopy(self.client_pruned_models[client_idx]).cpu()  # type: ignore
         else:
-            # Client not pruned, use original model structure
-            client.model_trainer.model = self.model
+            # Client not pruned, use original model structure (keep on CPU)
+            client.model_trainer.model = copy.deepcopy(self.model).cpu()
 
     def _get_client_training_weights(self, client_idx: int, w_global: Dict) -> Dict:
         """
@@ -372,7 +382,7 @@ class PruningTrainerAPI(FedAvgAPI):
             return w_global
 
         # Client has been pruned - need to extract relevant weights from global model
-        # Create a temporary full model and apply mask to get pruned structure
+        # Create a temporary full model and apply mask to get pruned structure (on CPU)
         temp_global_model = copy.deepcopy(self.model).cpu()
         temp_global_model.load_state_dict(w_global)
 
@@ -420,7 +430,7 @@ class PruningTrainerAPI(FedAvgAPI):
                 reference_mask = mask
                 break
 
-        # Build models from state dicts
+        # Build models from state dicts (keep on CPU for aggregation)
         models = []
         masks = []
         counters = []
@@ -428,7 +438,7 @@ class PruningTrainerAPI(FedAvgAPI):
         for w, mask, counter, client_idx in zip(weights_only, masks_locals, counters_locals, client_indexes):
             # If client has a mask, use the already stored pruned model structure
             if mask is not None:
-                # Use the already pruned model structure stored for this client
+                # Use the already pruned model structure stored for this client (keep on CPU)
                 pruned_model = copy.deepcopy(self.client_pruned_models[client_idx]).cpu()  # type: ignore
 
                 # Load client's trained weights into pruned structure
@@ -436,7 +446,7 @@ class PruningTrainerAPI(FedAvgAPI):
                 models.append(pruned_model)
                 masks.append(mask)
             else:
-                # Client has full model
+                # Client has full model (keep on CPU)
                 model = copy.deepcopy(self.model).cpu()
                 model.load_state_dict(w)
                 models.append(model)
@@ -445,7 +455,7 @@ class PruningTrainerAPI(FedAvgAPI):
 
             counters.append(counter)
 
-        # Aggregate using unified_aggregate
+        # Aggregate using unified_aggregate (happens on CPU)
         aggregated_model = aggregate_model(models, masks, counters)
 
         return aggregated_model.state_dict()
@@ -505,10 +515,12 @@ class PruningTrainerAPI(FedAvgAPI):
             # Test personal model with proper mask application
             personal_weights = self._get_client_training_weights(client_idx, w_global)
 
-            # Temporarily set the correct model structure for this client
+            # Temporarily set the correct model structure for this client and move to GPU
             original_model = self.model_trainer.model
             if self.client_pruned_models[client_idx] is not None:
-                self.model_trainer.model = self.client_pruned_models[client_idx]
+                self.model_trainer.model = copy.deepcopy(self.client_pruned_models[client_idx]).to(self.device)  # type: ignore
+            else:
+                self.model_trainer.model = copy.deepcopy(self.model).to(self.device)
 
             self.model_trainer.set_model_params(self.client_weights[client_idx])
             train_local_metrics = client.local_test(False)
@@ -523,14 +535,16 @@ class PruningTrainerAPI(FedAvgAPI):
                 test_metrics["num_correct"].append(copy.deepcopy(test_local_metrics["test_correct"]))
                 test_metrics["losses"].append(copy.deepcopy(test_local_metrics["test_loss"]))
 
-            # Restore original model structure and test global model
-            self.model_trainer.set_model_params(personal_weights)
-            global_train_local_metrics = client.local_test(True)
+                # Test global model
+                self.model_trainer.set_model_params(personal_weights)
+                global_train_local_metrics = client.local_test(True)
 
-            global_train_metrics["num_samples"].append(copy.deepcopy(global_train_local_metrics["test_total"]))
-            global_train_metrics["num_correct"].append(copy.deepcopy(global_train_local_metrics["test_correct"]))
-            global_train_metrics["losses"].append(copy.deepcopy(global_train_local_metrics["test_loss"]))
+                global_train_metrics["num_samples"].append(copy.deepcopy(global_train_local_metrics["test_total"]))
+                global_train_metrics["num_correct"].append(copy.deepcopy(global_train_local_metrics["test_correct"]))
+                global_train_metrics["losses"].append(copy.deepcopy(global_train_local_metrics["test_loss"]))
 
+            # Move model back to CPU and restore original structure
+            self.model_trainer.model = self.model_trainer.model.cpu()
             self.model_trainer.model = original_model
 
         # Log personal (pruned) model metrics
@@ -569,27 +583,27 @@ class PruningTrainerAPI(FedAvgAPI):
             mlops.log({"Test/Loss/Std": np.std(test_losses), "round": round_idx})
             logging.info({"test_acc": test_acc, "test_loss": test_loss})
 
-        # Log global model metrics
-        global_train_acc = sum(global_train_metrics["num_correct"]) / sum(global_train_metrics["num_samples"])
-        global_train_loss = sum(global_train_metrics["losses"]) / sum(global_train_metrics["num_samples"])
-        global_train_accs = [
-            c / s for c, s in zip(global_train_metrics["num_correct"], global_train_metrics["num_samples"])
-        ]
-        global_train_losses = [
-            loss / s for loss, s in zip(global_train_metrics["losses"], global_train_metrics["num_samples"])
-        ]
+            # Log global model metrics
+            global_train_acc = sum(global_train_metrics["num_correct"]) / sum(global_train_metrics["num_samples"])
+            global_train_loss = sum(global_train_metrics["losses"]) / sum(global_train_metrics["num_samples"])
+            global_train_accs = [
+                c / s for c, s in zip(global_train_metrics["num_correct"], global_train_metrics["num_samples"])
+            ]
+            global_train_losses = [
+                loss / s for loss, s in zip(global_train_metrics["losses"], global_train_metrics["num_samples"])
+            ]
 
-        if self.args.enable_wandb:
-            wandb.log({"Global/Test/Acc": global_train_acc, "round": round_idx})
-            wandb.log({"Global/Test/Loss": global_train_loss, "round": round_idx})
-            wandb.log({"Global/Test/Acc/Std": np.std(global_train_accs), "round": round_idx})
-            wandb.log({"Global/Test/Loss/Std": np.std(global_train_losses), "round": round_idx})
+            if self.args.enable_wandb:
+                wandb.log({"Global/Test/Acc": global_train_acc, "round": round_idx})
+                wandb.log({"Global/Test/Loss": global_train_loss, "round": round_idx})
+                wandb.log({"Global/Test/Acc/Std": np.std(global_train_accs), "round": round_idx})
+                wandb.log({"Global/Test/Loss/Std": np.std(global_train_losses), "round": round_idx})
 
-        mlops.log({"Global/Test/Acc": global_train_acc, "round": round_idx})
-        mlops.log({"Global/Test/Loss": global_train_loss, "round": round_idx})
-        mlops.log({"Global/Test/Acc/Std": np.std(global_train_accs), "round": round_idx})
-        mlops.log({"Global/Test/Loss/Std": np.std(global_train_losses), "round": round_idx})
-        logging.info({"global_test_acc": global_train_acc, "global_test_loss": global_train_loss})
+            mlops.log({"Global/Test/Acc": global_train_acc, "round": round_idx})
+            mlops.log({"Global/Test/Loss": global_train_loss, "round": round_idx})
+            mlops.log({"Global/Test/Acc/Std": np.std(global_train_accs), "round": round_idx})
+            mlops.log({"Global/Test/Loss/Std": np.std(global_train_losses), "round": round_idx})
+            logging.info({"global_test_acc": global_train_acc, "global_test_loss": global_train_loss})
 
     def _count_model_parameters(self, model_params):
         """Count total number of parameters in the model"""
