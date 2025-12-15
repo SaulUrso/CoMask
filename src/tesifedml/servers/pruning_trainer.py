@@ -370,7 +370,7 @@ class PruningTrainerAPI(FedAvgAPI):
             logging.info(f"Client {client_idx} validation accuracy {val_acc:.4f} >= threshold {threshold}, will prune")
             return True
         else:
-            logging.info(f"Client {client_idx} validation accuracy {val_acc:.4f} < threshold {threshold}, pruning")
+            logging.info(f"Client {client_idx} validation accuracy {val_acc:.4f} < threshold {threshold}, not pruning")
             return False
 
     def _prune_client_model(self, client_idx: int):
