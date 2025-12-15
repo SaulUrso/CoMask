@@ -1,5 +1,6 @@
 import copy
 import logging
+import time
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -152,11 +153,15 @@ class PruningTrainerAPI(FedAvgAPI):
         mlops.log_round_info(self.args.comm_round, -1)
 
         for round_idx in range(self.args.comm_round):
+            round_start_time = time.time()
             logging.info("################Communication round : {}".format(round_idx))
 
+            # Profile: Client sampling
+            t_start = time.time()
             client_indexes = self._client_sampling(
                 round_idx, self.args.client_num_in_total, self.args.client_num_per_round
             )
+            t_sampling = time.time() - t_start
             logging.info("client_indexes = " + str(client_indexes))
 
             w_locals = []
@@ -164,7 +169,15 @@ class PruningTrainerAPI(FedAvgAPI):
             counters_locals = []
             pruned_this_round = {}  # Track which clients pruned this round and their model sizes before/after
 
+            # Profile: Client training times
+            client_times = {}
+            total_prune_decision_time = 0
+            total_prune_execution_time = 0
+            total_model_update_time = 0
+            total_training_time = 0
+
             for idx, client_idx in enumerate(client_indexes):
+                client_start_time = time.time()
                 client = self.client_list[idx]
 
                 client.update_local_dataset(
@@ -176,9 +189,13 @@ class PruningTrainerAPI(FedAvgAPI):
                 )
 
                 # Check if client should prune before training
+                t_prune_decision_start = time.time()
                 should_prune = self._should_client_prune(client_idx, round_idx)
+                t_prune_decision = time.time() - t_prune_decision_start
+                total_prune_decision_time += t_prune_decision
 
                 if should_prune:
+                    t_prune_exec_start = time.time()
                     # Record model size before pruning for communication cost calculation
                     model_size_before = self._count_model_parameters(self.client_pruned_models[client_idx].state_dict())  # type: ignore
                     # Client prunes immediately before training
@@ -191,8 +208,11 @@ class PruningTrainerAPI(FedAvgAPI):
                         "before": model_size_before,
                         "after": model_size_after,
                     }
+                    t_prune_exec = time.time() - t_prune_exec_start
+                    total_prune_execution_time += t_prune_exec
 
                 # Update client's model trainer to use the correct structure (pruned or full)
+                t_model_update_start = time.time()
                 self._update_client_model_structure(client, client_idx)
 
                 # Move client's model to GPU for training
@@ -200,11 +220,16 @@ class PruningTrainerAPI(FedAvgAPI):
 
                 # Get the client's training weights (for the correct structure)
                 client_train_weights = self._get_client_training_weights(client_idx, w_global)
+                t_model_update = time.time() - t_model_update_start
+                total_model_update_time += t_model_update
 
                 # Train on the client's (possibly pruned) model
+                t_train_start = time.time()
                 mlops.event("train", event_started=True, event_value="{}_{}".format(str(round_idx), str(idx)))
                 w = client.train(copy.deepcopy(client_train_weights))
                 mlops.event("train", event_started=False, event_value="{}_{}".format(str(round_idx), str(idx)))
+                t_train = time.time() - t_train_start
+                total_training_time += t_train
 
                 # Move model back to CPU after training
                 client.model_trainer.model = client.model_trainer.model.cpu()
@@ -218,28 +243,83 @@ class PruningTrainerAPI(FedAvgAPI):
                 counters_locals.append(client.get_sample_number())
                 self.client_weights[client_idx] = copy.deepcopy(w)
 
+                client_total_time = time.time() - client_start_time
+                client_times[client_idx] = client_total_time
+
             # Log communication costs
             # self._log_communication_cost(round_idx, client_indexes, model_size_bits, total_params) #TODO: put comm cost
 
             # for training you changed the structure of the model in the model trainer, so now you need to restore it
             # self.model_trainer.model = self.model
 
+            t_agg_start = time.time()
             mlops.event("agg", event_started=True, event_value=str(round_idx))
             w_global = self._aggregate_with_masks(w_locals, masks_locals, counters_locals, client_indexes)
             self.model_trainer.set_model_params(w_global)
             mlops.event("agg", event_started=False, event_value=str(round_idx))
+            t_aggregation = time.time() - t_agg_start
 
+            t_test_start = time.time()
             if round_idx == self.args.comm_round - 1:
                 self._local_test_on_all_clients(round_idx)
                 self._test_server(round_idx)
             elif round_idx % self.args.frequency_of_the_test == 0:
                 self._local_test_on_all_clients(round_idx)
                 self._test_server(round_idx)
+            t_testing = time.time() - t_test_start
 
             mlops.log_round_info(self.args.comm_round, round_idx)
 
             # Log communication costs
+            t_comm_cost_start = time.time()
             self._log_communication_cost(round_idx, client_indexes, pruned_this_round)
+            t_comm_cost = time.time() - t_comm_cost_start
+
+            # Calculate and log profiling metrics
+            round_total_time = time.time() - round_start_time
+
+            # Log timing information
+            timing_info = {
+                "Profile/Round/Total": round_total_time,
+                "Profile/Round/ClientSampling": t_sampling,
+                "Profile/Round/PruneDecision": total_prune_decision_time,
+                "Profile/Round/PruneExecution": total_prune_execution_time,
+                "Profile/Round/ModelUpdate": total_model_update_time,
+                "Profile/Round/Training": total_training_time,
+                "Profile/Round/Aggregation": t_aggregation,
+                "Profile/Round/Testing": t_testing,
+                "Profile/Round/CommCost": t_comm_cost,
+            }
+
+            # Calculate percentages
+            if round_total_time > 0:
+                timing_info["Profile/Percent/Training"] = (total_training_time / round_total_time) * 100
+                timing_info["Profile/Percent/Aggregation"] = (t_aggregation / round_total_time) * 100
+                timing_info["Profile/Percent/Testing"] = (t_testing / round_total_time) * 100
+                timing_info["Profile/Percent/PruneDecision"] = (total_prune_decision_time / round_total_time) * 100
+                timing_info["Profile/Percent/PruneExecution"] = (total_prune_execution_time / round_total_time) * 100
+
+            # Log to wandb and mlops
+            for key, value in timing_info.items():
+                if self.args.enable_wandb:
+                    wandb.log({key: value, "round": round_idx})
+                mlops.log({key: value, "round": round_idx})
+
+            # Log per-client times
+            for client_idx_log, client_time in client_times.items():
+                if self.args.enable_wandb:
+                    wandb.log({f"Profile/Client_{client_idx_log}/Time": client_time, "round": round_idx})
+                mlops.log({f"Profile/Client_{client_idx_log}/Time": client_time, "round": round_idx})
+
+            # Log summary to console
+            logging.info(
+                f"Round {round_idx} Profiling - Total: {round_total_time:.2f}s, "
+                f"Training: {total_training_time:.2f}s ({total_training_time / round_total_time * 100:.1f}%), "
+                f"Aggregation: {t_aggregation:.2f}s ({t_aggregation / round_total_time * 100:.1f}%), "
+                f"Testing: {t_testing:.2f}s ({t_testing / round_total_time * 100:.1f}%), "
+                f"Prune Decision: {total_prune_decision_time:.2f}s, "
+                f"Prune Execution: {total_prune_execution_time:.2f}s"
+            )
 
         mlops.log_training_finished_status()
         mlops.log_aggregation_finished_status()
