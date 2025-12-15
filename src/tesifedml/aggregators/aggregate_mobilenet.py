@@ -82,18 +82,19 @@ def _aggregate_basic_conv2d(aggregated_block, models, masks, weights, mask_key, 
 
     original_out_channels = aggregated_conv.out_channels
     original_in_channels = aggregated_conv.in_channels
+    device = aggregated_conv.weight.device
 
-    # Initialize accumulators
+    # Initialize accumulators on the correct device
     conv_weight_sum = torch.zeros_like(aggregated_conv.weight.data)
-    conv_weight_count = torch.zeros(original_out_channels, original_in_channels)
+    conv_weight_count = torch.zeros(original_out_channels, original_in_channels, device=device)
     conv_bias_sum = torch.zeros_like(aggregated_conv.bias.data) if aggregated_conv.bias is not None else None
-    conv_bias_count = torch.zeros(original_out_channels)
+    conv_bias_count = torch.zeros(original_out_channels, device=device)
 
     bn_weight_sum = torch.zeros_like(aggregated_bn.weight.data)
     bn_bias_sum = torch.zeros_like(aggregated_bn.bias.data)
     bn_running_mean_sum = torch.zeros_like(aggregated_bn.running_mean)
     bn_running_var_sum = torch.zeros_like(aggregated_bn.running_var)
-    bn_count = torch.zeros(original_out_channels)
+    bn_count = torch.zeros(original_out_channels, device=device)
 
     # Aggregate from each model
     for model, mask_dict, weight in zip(models, masks, weights):
@@ -101,6 +102,7 @@ def _aggregate_basic_conv2d(aggregated_block, models, masks, weights, mask_key, 
             raise ValueError(f"Mask key '{mask_key}' not found in mask_dict for client with weight {weight}.")
 
         kept_indices = mask_dict[mask_key]["indices_kept"]
+        kept_indices_tensor = torch.from_numpy(kept_indices).to(device)
 
         # Get corresponding block from pruned model
         model_block = _get_nested_attr(model, block_name)
@@ -110,32 +112,31 @@ def _aggregate_basic_conv2d(aggregated_block, models, masks, weights, mask_key, 
         # Get previous layer's kept indices for input channel mapping
         prev_kept_indices = _get_previous_layer_indices(block_name, mask_dict)
 
-        # Aggregate each kept filter
-        for pruned_idx, original_idx in enumerate(kept_indices):
-            # Aggregate Conv2d weights
-            if prev_kept_indices is None:
-                # First layer - all input channels present
-                conv_weight_sum[original_idx, :, :, :] += weight * model_conv.weight.data[pruned_idx, :, :, :]
-                conv_weight_count[original_idx, :] += weight
-            else:
-                # Map input channels using previous layer's mask
-                for pruned_in_idx, original_in_idx in enumerate(prev_kept_indices):
-                    conv_weight_sum[original_idx, original_in_idx, :, :] += (
-                        weight * model_conv.weight.data[pruned_idx, pruned_in_idx, :, :]
-                    )
-                    conv_weight_count[original_idx, original_in_idx] += weight
+        # Vectorized aggregation of Conv2d weights
+        if prev_kept_indices is None:
+            # First layer - all input channels present
+            conv_weight_sum.index_add_(0, kept_indices_tensor, weight * model_conv.weight.data)
+            conv_weight_count[kept_indices, :] += weight
+        else:
+            # Map input channels using previous layer's mask
+            prev_indices_tensor = torch.from_numpy(prev_kept_indices).to(device)
+            # Use advanced indexing for vectorized update
+            weighted_weights = weight * model_conv.weight.data
+            for i, orig_out_idx in enumerate(kept_indices):
+                conv_weight_sum[orig_out_idx, prev_kept_indices, :, :] += weighted_weights[i, :, :, :]
+                conv_weight_count[orig_out_idx, prev_kept_indices] += weight
 
-            # Aggregate Conv2d bias
-            if conv_bias_sum is not None and model_conv.bias is not None:
-                conv_bias_sum[original_idx] += weight * model_conv.bias.data[pruned_idx]
-                conv_bias_count[original_idx] += weight
+        # Vectorized aggregation of Conv2d bias
+        if conv_bias_sum is not None and model_conv.bias is not None:
+            conv_bias_sum.index_add_(0, kept_indices_tensor, weight * model_conv.bias.data)
+            conv_bias_count[kept_indices] += weight
 
-            # Aggregate BatchNorm parameters
-            bn_weight_sum[original_idx] += weight * model_bn.weight.data[pruned_idx]
-            bn_bias_sum[original_idx] += weight * model_bn.bias.data[pruned_idx]
-            bn_running_mean_sum[original_idx] += weight * model_bn.running_mean[pruned_idx]
-            bn_running_var_sum[original_idx] += weight * model_bn.running_var[pruned_idx]
-            bn_count[original_idx] += weight
+        # Vectorized aggregation of BatchNorm parameters
+        bn_weight_sum.index_add_(0, kept_indices_tensor, weight * model_bn.weight.data)
+        bn_bias_sum.index_add_(0, kept_indices_tensor, weight * model_bn.bias.data)
+        bn_running_mean_sum.index_add_(0, kept_indices_tensor, weight * model_bn.running_mean)
+        bn_running_var_sum.index_add_(0, kept_indices_tensor, weight * model_bn.running_var)
+        bn_count[kept_indices] += weight
 
     # Apply weighted averages
     mask = conv_weight_count > 0
@@ -163,35 +164,36 @@ def _aggregate_depth_separable_conv2d(aggregated_block, models, masks, weights, 
     # Get dimensions
     original_in_channels = aggregated_depthwise_conv.in_channels  # == out_channels for depthwise
     original_out_channels = aggregated_pointwise_conv.out_channels
+    device = aggregated_pointwise_conv.weight.device
 
-    # Initialize accumulators for depthwise conv
+    # Initialize accumulators for depthwise conv on correct device
     # Depthwise conv shape: [in_channels, 1, kernel_h, kernel_w] (groups=in_channels)
     depthwise_weight_sum = torch.zeros_like(aggregated_depthwise_conv.weight.data)
-    depthwise_weight_count = torch.zeros(original_in_channels)
+    depthwise_weight_count = torch.zeros(original_in_channels, device=device)
     depthwise_bias_sum = (
         torch.zeros_like(aggregated_depthwise_conv.bias.data) if aggregated_depthwise_conv.bias is not None else None
     )
-    depthwise_bias_count = torch.zeros(original_in_channels)
+    depthwise_bias_count = torch.zeros(original_in_channels, device=device)
 
     depthwise_bn_weight_sum = torch.zeros_like(aggregated_depthwise_bn.weight.data)
     depthwise_bn_bias_sum = torch.zeros_like(aggregated_depthwise_bn.bias.data)
     depthwise_bn_running_mean_sum = torch.zeros_like(aggregated_depthwise_bn.running_mean)
     depthwise_bn_running_var_sum = torch.zeros_like(aggregated_depthwise_bn.running_var)
-    depthwise_bn_count = torch.zeros(original_in_channels)
+    depthwise_bn_count = torch.zeros(original_in_channels, device=device)
 
-    # Initialize accumulators for pointwise conv
+    # Initialize accumulators for pointwise conv on correct device
     pointwise_weight_sum = torch.zeros_like(aggregated_pointwise_conv.weight.data)
-    pointwise_weight_count = torch.zeros(original_out_channels, original_in_channels)
+    pointwise_weight_count = torch.zeros(original_out_channels, original_in_channels, device=device)
     pointwise_bias_sum = (
         torch.zeros_like(aggregated_pointwise_conv.bias.data) if aggregated_pointwise_conv.bias is not None else None
     )
-    pointwise_bias_count = torch.zeros(original_out_channels)
+    pointwise_bias_count = torch.zeros(original_out_channels, device=device)
 
     pointwise_bn_weight_sum = torch.zeros_like(aggregated_pointwise_bn.weight.data)
     pointwise_bn_bias_sum = torch.zeros_like(aggregated_pointwise_bn.bias.data)
     pointwise_bn_running_mean_sum = torch.zeros_like(aggregated_pointwise_bn.running_mean)
     pointwise_bn_running_var_sum = torch.zeros_like(aggregated_pointwise_bn.running_var)
-    pointwise_bn_count = torch.zeros(original_out_channels)
+    pointwise_bn_count = torch.zeros(original_out_channels, device=device)
 
     # Aggregate from each model
     for model, mask_dict, weight in zip(models, masks, weights):
@@ -210,86 +212,63 @@ def _aggregate_depth_separable_conv2d(aggregated_block, models, masks, weights, 
         # Get previous layer's kept indices for input channel mapping
         prev_kept_indices = _get_previous_layer_indices(block_name, mask_dict)
 
-        # Aggregate depthwise conv (which adapts based on input channels from previous layer)
+        # Vectorized aggregation of depthwise conv
         if prev_kept_indices is not None:
-            for pruned_in_idx, original_in_idx in enumerate(prev_kept_indices):
-                # Depthwise conv: each input channel has its own filter
-                depthwise_weight_sum[original_in_idx, :, :, :] += (
-                    weight * model_depthwise_conv.weight.data[pruned_in_idx, :, :, :]
-                )
-                depthwise_weight_count[original_in_idx] += weight
+            prev_indices_tensor = torch.from_numpy(prev_kept_indices).to(device)
 
-                if depthwise_bias_sum is not None and model_depthwise_conv.bias is not None:
-                    depthwise_bias_sum[original_in_idx] += weight * model_depthwise_conv.bias.data[pruned_in_idx]
-                    depthwise_bias_count[original_in_idx] += weight
+            # Depthwise conv: each input channel has its own filter
+            depthwise_weight_sum[prev_kept_indices] += weight * model_depthwise_conv.weight.data
+            depthwise_weight_count[prev_kept_indices] += weight
 
-                # Depthwise BatchNorm
-                depthwise_bn_weight_sum[original_in_idx] += weight * model_depthwise_bn.weight.data[pruned_in_idx]
-                depthwise_bn_bias_sum[original_in_idx] += weight * model_depthwise_bn.bias.data[pruned_in_idx]
-                depthwise_bn_running_mean_sum[original_in_idx] += (
-                    weight * model_depthwise_bn.running_mean[pruned_in_idx]
-                )
-                depthwise_bn_running_var_sum[original_in_idx] += weight * model_depthwise_bn.running_var[pruned_in_idx]
-                depthwise_bn_count[original_in_idx] += weight
+            if depthwise_bias_sum is not None and model_depthwise_conv.bias is not None:
+                depthwise_bias_sum.index_add_(0, prev_indices_tensor, weight * model_depthwise_conv.bias.data)
+                depthwise_bias_count[prev_kept_indices] += weight
+
+            # Vectorized depthwise BatchNorm aggregation
+            depthwise_bn_weight_sum.index_add_(0, prev_indices_tensor, weight * model_depthwise_bn.weight.data)
+            depthwise_bn_bias_sum.index_add_(0, prev_indices_tensor, weight * model_depthwise_bn.bias.data)
+            depthwise_bn_running_mean_sum.index_add_(0, prev_indices_tensor, weight * model_depthwise_bn.running_mean)
+            depthwise_bn_running_var_sum.index_add_(0, prev_indices_tensor, weight * model_depthwise_bn.running_var)
+            depthwise_bn_count[prev_kept_indices] += weight
         else:
-            raise ValueError(f"prev_kept_indices is {None}, but layer {block_name} is not the first one.saul")
-            # First layer - all input channels present
-            # This shouldn't happen as stem.0 is BasicConv2d
-            for original_in_idx in range(original_in_channels):
-                depthwise_weight_sum[original_in_idx, :, :, :] += (
-                    weight * model_depthwise_conv.weight.data[original_in_idx, :, :, :]
-                )
-                depthwise_weight_count[original_in_idx] += weight
+            raise ValueError(f"prev_kept_indices is {None}, but layer {block_name} is not the first one.")
 
-                if depthwise_bias_sum is not None and model_depthwise_conv.bias is not None:
-                    depthwise_bias_sum[original_in_idx] += weight * model_depthwise_conv.bias.data[original_in_idx]
-                    depthwise_bias_count[original_in_idx] += weight
+        # Vectorized aggregation of pointwise conv (this is where output pruning happens)
+        kept_indices_tensor = torch.from_numpy(kept_indices).to(device)
+        weighted_pointwise_weights = weight * model_pointwise_conv.weight.data
 
-                depthwise_bn_weight_sum[original_in_idx] += weight * model_depthwise_bn.weight.data[original_in_idx]
-                depthwise_bn_bias_sum[original_in_idx] += weight * model_depthwise_bn.bias.data[original_in_idx]
-                depthwise_bn_running_mean_sum[original_in_idx] += (
-                    weight * model_depthwise_bn.running_mean[original_in_idx]
-                )
-                depthwise_bn_running_var_sum[original_in_idx] += (
-                    weight * model_depthwise_bn.running_var[original_in_idx]
-                )
-                depthwise_bn_count[original_in_idx] += weight
+        if prev_kept_indices is not None:
+            # Map input channels using previous layer's mask
+            for i, original_out_idx in enumerate(kept_indices):
+                pointwise_weight_sum[original_out_idx, prev_kept_indices, :, :] += weighted_pointwise_weights[
+                    i, :, :, :
+                ]
+                pointwise_weight_count[original_out_idx, prev_kept_indices] += weight
+        else:
+            # All input channels present
+            pointwise_weight_sum[kept_indices] += weighted_pointwise_weights
+            pointwise_weight_count[kept_indices, :] += weight
 
-        # Aggregate pointwise conv (this is where output pruning happens)
-        for pruned_out_idx, original_out_idx in enumerate(kept_indices):
-            if prev_kept_indices is not None:
-                # Map input channels using previous layer's mask
-                for pruned_in_idx, original_in_idx in enumerate(prev_kept_indices):
-                    pointwise_weight_sum[original_out_idx, original_in_idx, :, :] += (
-                        weight * model_pointwise_conv.weight.data[pruned_out_idx, pruned_in_idx, :, :]
-                    )
-                    pointwise_weight_count[original_out_idx, original_in_idx] += weight
-            else:
-                # All input channels present
-                pointwise_weight_sum[original_out_idx, :, :, :] += (
-                    weight * model_pointwise_conv.weight.data[pruned_out_idx, :, :, :]
-                )
-                pointwise_weight_count[original_out_idx, :] += weight
+        # Vectorized aggregation of pointwise bias
+        if pointwise_bias_sum is not None and model_pointwise_conv.bias is not None:
+            pointwise_bias_sum.index_add_(0, kept_indices_tensor, weight * model_pointwise_conv.bias.data)
+            pointwise_bias_count[kept_indices] += weight
 
-            # Aggregate pointwise bias
-            if pointwise_bias_sum is not None and model_pointwise_conv.bias is not None:
-                pointwise_bias_sum[original_out_idx] += weight * model_pointwise_conv.bias.data[pruned_out_idx]
-                pointwise_bias_count[original_out_idx] += weight
+        # Vectorized aggregation of pointwise BatchNorm
+        pointwise_bn_weight_sum.index_add_(0, kept_indices_tensor, weight * model_pointwise_bn.weight.data)
+        pointwise_bn_bias_sum.index_add_(0, kept_indices_tensor, weight * model_pointwise_bn.bias.data)
+        pointwise_bn_running_mean_sum.index_add_(0, kept_indices_tensor, weight * model_pointwise_bn.running_mean)
+        pointwise_bn_running_var_sum.index_add_(0, kept_indices_tensor, weight * model_pointwise_bn.running_var)
+        pointwise_bn_count[kept_indices] += weight
 
-            # Aggregate pointwise BatchNorm
-            pointwise_bn_weight_sum[original_out_idx] += weight * model_pointwise_bn.weight.data[pruned_out_idx]
-            pointwise_bn_bias_sum[original_out_idx] += weight * model_pointwise_bn.bias.data[pruned_out_idx]
-            pointwise_bn_running_mean_sum[original_out_idx] += weight * model_pointwise_bn.running_mean[pruned_out_idx]
-            pointwise_bn_running_var_sum[original_out_idx] += weight * model_pointwise_bn.running_var[pruned_out_idx]
-            pointwise_bn_count[original_out_idx] += weight
-
-    # Apply weighted averages for depthwise conv
+    # Apply weighted averages for depthwise conv (vectorized)
     depthwise_mask = depthwise_weight_count > 0
-    for ch_idx in range(original_in_channels):
-        if depthwise_mask[ch_idx]:
-            aggregated_depthwise_conv.weight.data[ch_idx, :, :, :] = (
-                depthwise_weight_sum[ch_idx, :, :, :] / depthwise_weight_count[ch_idx]
-            )
+    if depthwise_mask.any():
+        # Reshape count for broadcasting: [N, 1, 1, 1]
+        depthwise_weight_count_expanded = depthwise_weight_count.view(-1, 1, 1, 1)
+        aggregated_depthwise_conv.weight.data[depthwise_mask] = (
+            depthwise_weight_sum[depthwise_mask] / depthwise_weight_count_expanded[depthwise_mask]
+        )
 
     if depthwise_bias_sum is not None:
         depthwise_bias_mask = depthwise_bias_count > 0
@@ -342,12 +321,13 @@ def _aggregate_linear_layer(aggregated_linear, models, masks, weights):
     """Aggregate the linear layer from multiple models."""
     original_in_features = aggregated_linear.in_features
     original_out_features = aggregated_linear.out_features
+    device = aggregated_linear.weight.device
 
-    # Initialize accumulators
+    # Initialize accumulators on correct device
     linear_weight_sum = torch.zeros_like(aggregated_linear.weight.data)
-    linear_weight_count = torch.zeros(original_out_features, original_in_features)
+    linear_weight_count = torch.zeros(original_out_features, original_in_features, device=device)
     linear_bias_sum = torch.zeros_like(aggregated_linear.bias.data) if aggregated_linear.bias is not None else None
-    linear_bias_count = torch.zeros(original_out_features)
+    linear_bias_count = torch.zeros(original_out_features, device=device)
 
     # Aggregate from each model
     for model, mask_dict, weight in zip(models, masks, weights):
@@ -360,13 +340,12 @@ def _aggregate_linear_layer(aggregated_linear, models, masks, weights):
         last_conv_kept_indices = mask_dict[last_conv_mask_key]["indices_kept"]
         model_linear = model.fc
 
-        # The linear layer input is the output of adaptive avg pooling
+        # Vectorized aggregation: The linear layer input is the output of adaptive avg pooling
         # So each kept filter contributes 1 feature to the linear layer
-        for pruned_idx, original_idx in enumerate(last_conv_kept_indices):
-            linear_weight_sum[:, original_idx] += weight * model_linear.weight.data[:, pruned_idx]
-            linear_weight_count[:, original_idx] += weight
+        linear_weight_sum[:, last_conv_kept_indices] += weight * model_linear.weight.data
+        linear_weight_count[:, last_conv_kept_indices] += weight
 
-        # Aggregate bias
+        # Aggregate bias (vectorized)
         if linear_bias_sum is not None and model_linear.bias is not None:
             linear_bias_sum += weight * model_linear.bias.data
             linear_bias_count += weight
