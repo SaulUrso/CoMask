@@ -1,10 +1,10 @@
 from typing import Dict, List
 
-from fedml.model.cv.resnet_cifar import ResNet
 from torch import nn
 
 from ..models.cnn import HARBox_CNN
 from ..models.mobilenet import MobileNet
+from ..models.resnet_cifar import ResNet
 from .aggregate_cnn import aggregate_cnn_with_masks
 from .aggregate_mobilenet import aggregate_mobilenet_with_masks
 from .aggregate_resnet import aggregate_resnet_with_masks
