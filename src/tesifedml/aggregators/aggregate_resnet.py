@@ -1,24 +1,10 @@
-"""
-ResNet Model Aggregation with Pruning Masks
+from typing import Dict, List
 
-This module provides functionality to aggregate multiple pruned ResNet models using their
-pruning masks. It supports weighted aggregation based on client data counts and handles:
-- Initial convolutional layer (conv1)
-- ResNet layers with BasicBlocks (layer1-4)
-- Downsampling layers within BasicBlocks
-- Final fully connected layer
-- Both BatchNorm2d and GroupNorm2d normalization layers
-
-The aggregation follows the original filter positions, ensuring that each filter in the
-aggregated model is the weighted average of all corresponding filters from client models
-that retained that specific filter after pruning.
-"""
-
-from typing import Dict, List, Optional
-
+import numpy as np
 import torch
 import torch.nn as nn
-from fedml.model.cv.resnet_cifar import BasicBlock, resnet18_cifar
+
+from tesifedml.models.resnet_cifar import resnet18_cifar
 
 
 def aggregate_resnet_with_masks(
@@ -26,37 +12,28 @@ def aggregate_resnet_with_masks(
     masks: List[Dict],
     counters: List[int],
     num_classes: int = 10,
-    group_norm: int = 0,
 ) -> nn.Module:
     """
-    Aggregate multiple pruned ResNet models using their pruning masks.
+    Aggregate multiple pruned ResNet18 models using their pruning masks.
 
-    This function performs weighted aggregation of pruned ResNet models, where each parameter
+    This function performs weighted aggregation of pruned models, where each parameter
     is the weighted sum (weighted by counters) of parameters whose mask is not zero.
+    Parameters that receive no contribution from any model remain as zeros.
 
     Args:
-        models: List of pruned ResNet models
-        masks: List of mask dictionaries for each model. Each mask dict contains layer-wise masks with:
+        models: List of pruned ResNet18 models
+        masks: List of mask dictionaries for each model. Each mask dict contains layer names as keys,
+               mapping to dict with:
                - "mask": torch.Tensor - Boolean mask indicating kept filters
                - "indices_kept": np.ndarray - Indices of kept filters in original model
                - "layer_type": str - Type of layer (e.g., "conv")
                - "original_filters": int - Number of filters in original unpruned model
                - "pruned_filters": int - Number of filters kept after pruning
-        counters: List of weights for weighted averaging (e.g., number of data samples)
-        num_classes: Number of output classes for the classifier
-        group_norm: Group normalization parameter (0 means BatchNorm2d)
+        counters: List of weights for weighted averaging (e.g., number of data samples per client)
+        num_classes: Number of output classes
 
     Returns:
-        Aggregated ResNet model with structure matching the union of all kept filters
-
-    Example:
-        >>> model1 = prune_resnet(resnet18_cifar(), rate=0.3)
-        >>> model2 = prune_resnet(resnet18_cifar(), rate=0.5)
-        >>> aggregated = aggregate_resnet_with_masks(
-        ...     [model1, model2],
-        ...     [mask1, mask2],
-        ...     [100, 50]  # model1 has 100 samples, model2 has 50
-        ... )
+        Aggregated ResNet18 model with structure matching the original unpruned model
     """
     assert len(models) == len(masks) == len(counters), "Models, masks, and counters must have same length"
     assert len(models) > 0, "Must provide at least one model"
@@ -66,9 +43,19 @@ def aggregate_resnet_with_masks(
     weights = [c / total_count for c in counters]
 
     # Create a new unpruned model as template for aggregation
-    aggregated_model = resnet18_cifar(num_classes=num_classes, group_norm=group_norm)
+    aggregated_model = resnet18_cifar(num_classes=num_classes)
 
-    # Aggregate initial conv1 layer
+    # Initialize all parameters to zero
+    with torch.no_grad():
+        for param in aggregated_model.parameters():
+            param.zero_()
+        # Also zero out running stats in BatchNorm layers
+        for module in aggregated_model.modules():
+            if isinstance(module, nn.BatchNorm2d):
+                module.running_mean.zero_()
+                module.running_var.zero_()
+
+    # Aggregate initial conv1 and bn1
     _aggregate_conv_bn(
         aggregated_model.conv1,
         aggregated_model.bn1,
@@ -76,467 +63,311 @@ def aggregate_resnet_with_masks(
         masks,
         weights,
         mask_key="conv1",
-        prev_mask_key=None,  # First layer has no previous layer
+        conv_attr="conv1",
+        bn_attr="bn1",
+        get_prev_indices_fn=lambda mask_dict: None,  # First layer, no previous
     )
 
-    # Aggregate each ResNet layer (layer1, layer2, layer3, layer4)
+    # Aggregate each layer (layer1, layer2, layer3, layer4)
     for layer_name in ["layer1", "layer2", "layer3", "layer4"]:
-        layer = getattr(aggregated_model, layer_name)
+        aggregated_layer = getattr(aggregated_model, layer_name)
 
-        # Aggregate each BasicBlock in the layer
-        for block_idx, block in enumerate(layer):
-            block_prefix = f"{layer_name}.{block_idx}"
+        for block_idx, aggregated_block in enumerate(aggregated_layer):
+            block_key = f"{layer_name}.{block_idx}"
 
-            # Determine previous layer mask key for input channel mapping
-            if layer_name == "layer1" and block_idx == 0:
-                # First block of layer1 follows conv1
-                prev_mask_key = "conv1"
-            elif block_idx == 0:
-                # First block of other layers follows last block of previous layer
-                prev_layer_num = int(layer_name[-1]) - 1
-                prev_layer_name = f"layer{prev_layer_num}"
-                # Get number of blocks in previous layer
-                prev_layer = getattr(aggregated_model, prev_layer_name)
-                prev_block_idx = len(prev_layer) - 1
-                prev_mask_key = f"{prev_layer_name}.{prev_block_idx}.conv2"
-            else:
-                # Other blocks follow previous block in same layer
-                prev_mask_key = f"{layer_name}.{block_idx - 1}.conv2"
-
-            _aggregate_basic_block(
-                block,
+            # Aggregate conv1 in the block
+            _aggregate_conv_bn(
+                aggregated_block.conv1,
+                aggregated_block.bn1,
                 models,
                 masks,
                 weights,
-                block_prefix,
-                prev_mask_key,
+                mask_key=f"{block_key}.conv1",
+                conv_attr=f"{layer_name}.{block_idx}.conv1",
+                bn_attr=f"{layer_name}.{block_idx}.bn1",
+                get_prev_indices_fn=lambda md, bk=block_key: _get_previous_layer_indices_resnet(f"{bk}.conv1", md),
             )
 
-    # Aggregate final linear layer
-    # The input to fc comes from the last block of layer4
-    last_conv_mask_key = "layer4.1.conv2"  # layer4 has 2 blocks (0 and 1) for resnet18
-    _aggregate_linear_layer(
+            # Aggregate conv2 in the block
+            _aggregate_conv_bn(
+                aggregated_block.conv2,
+                aggregated_block.bn2,
+                models,
+                masks,
+                weights,
+                mask_key=f"{block_key}.conv2",
+                conv_attr=f"{layer_name}.{block_idx}.conv2",
+                bn_attr=f"{layer_name}.{block_idx}.bn2",
+                get_prev_indices_fn=lambda md, bk=block_key: md[f"{bk}.conv1"]["indices_kept"],
+            )
+
+            # Aggregate downsample if present
+            if aggregated_block.downsample is not None:
+                _aggregate_downsample(
+                    aggregated_block.downsample,
+                    models,
+                    masks,
+                    weights,
+                    block_key=block_key,
+                    layer_name=layer_name,
+                    block_idx=block_idx,
+                )
+
+    # Aggregate the final fully connected layer
+    _aggregate_fc_layer(
         aggregated_model.fc,
         models,
         masks,
         weights,
-        last_conv_mask_key,
     )
 
     return aggregated_model
 
 
-def _aggregate_basic_block(
-    aggregated_block: BasicBlock,
-    models: List[nn.Module],
-    masks: List[Dict],
-    weights: List[float],
-    block_prefix: str,
-    prev_mask_key: str,
-):
-    """
-    Aggregate a BasicBlock from multiple models.
-
-    Args:
-        aggregated_block: The BasicBlock in the aggregated model to fill
-        models: List of pruned models
-        masks: List of mask dictionaries
-        weights: Normalized weights for averaging
-        block_prefix: Prefix for mask keys (e.g., "layer1.0")
-        prev_mask_key: Mask key of the previous layer for input channel mapping
-    """
-    # Aggregate conv1
-    conv1_mask_key = f"{block_prefix}.conv1"
-    _aggregate_conv_bn(
-        aggregated_block.conv1,
-        aggregated_block.bn1,
-        models,
-        masks,
-        weights,
-        mask_key=conv1_mask_key,
-        prev_mask_key=prev_mask_key,
-    )
-
-    # Aggregate conv2
-    conv2_mask_key = f"{block_prefix}.conv2"
-    _aggregate_conv_bn(
-        aggregated_block.conv2,
-        aggregated_block.bn2,
-        models,
-        masks,
-        weights,
-        mask_key=conv2_mask_key,
-        prev_mask_key=conv1_mask_key,
-    )
-
-    # Aggregate downsample if present
-    if aggregated_block.downsample is not None:
-        downsample_conv = aggregated_block.downsample[0]
-        downsample_bn = aggregated_block.downsample[1]
-
-        # Downsample uses same input as block's conv1 and same output as block's conv2
-        # We need to aggregate it separately with a special handler
-        _aggregate_downsample(
-            downsample_conv,
-            downsample_bn,
-            models,
-            masks,
-            weights,
-            block_prefix,
-            conv2_mask_key,  # Output matches conv2
-            prev_mask_key,  # Input matches block input
-        )
-
-
 def _aggregate_conv_bn(
     aggregated_conv: nn.Conv2d,
-    aggregated_bn: nn.Module,  # Can be BatchNorm2d or GroupNorm2d
+    aggregated_bn: nn.BatchNorm2d,
     models: List[nn.Module],
     masks: List[Dict],
     weights: List[float],
     mask_key: str,
-    prev_mask_key: Optional[str] = None,
+    conv_attr: str,
+    bn_attr: str,
+    get_prev_indices_fn,
 ):
-    """
-    Aggregate a Conv2d + BatchNorm2d pair from multiple models.
-
-    Args:
-        aggregated_conv: Conv2d layer in aggregated model
-        aggregated_bn: BatchNorm2d layer in aggregated model
-        models: List of pruned models
-        masks: List of mask dictionaries
-        weights: Normalized weights for averaging
-        mask_key: Key for this layer's mask
-        prev_mask_key: Key for previous layer's mask (for input channel mapping)
-    """
+    """Aggregate a Conv2d + BatchNorm2d pair from multiple pruned models."""
     original_out_channels = aggregated_conv.out_channels
     original_in_channels = aggregated_conv.in_channels
     device = aggregated_conv.weight.device
 
-    # Initialize accumulators on correct device
+    # Initialize accumulators
     conv_weight_sum = torch.zeros_like(aggregated_conv.weight.data)
     conv_weight_count = torch.zeros(original_out_channels, original_in_channels, device=device)
-    conv_bias_sum = torch.zeros_like(aggregated_conv.bias.data) if aggregated_conv.bias is not None else None
-    conv_bias_count = torch.zeros(original_out_channels, device=device)
 
     bn_weight_sum = torch.zeros_like(aggregated_bn.weight.data)
     bn_bias_sum = torch.zeros_like(aggregated_bn.bias.data)
-
-    # Handle running stats - they might be None for GroupNorm2d
-    bn_running_mean_sum = (
-        torch.zeros_like(aggregated_bn.running_mean)
-        if hasattr(aggregated_bn, "running_mean") and aggregated_bn.running_mean is not None
-        else None
-    )
-    bn_running_var_sum = (
-        torch.zeros_like(aggregated_bn.running_var)
-        if hasattr(aggregated_bn, "running_var") and aggregated_bn.running_var is not None
-        else None
-    )
+    bn_running_mean_sum = torch.zeros_like(aggregated_bn.running_mean)
+    bn_running_var_sum = torch.zeros_like(aggregated_bn.running_var)
     bn_count = torch.zeros(original_out_channels, device=device)
 
     # Aggregate from each model
     for model, mask_dict, weight in zip(models, masks, weights):
-        if mask_key not in mask_dict:
-            raise ValueError(f"Mask key '{mask_key}' not found in mask_dict for client with weight {weight}.")
-
         kept_indices = mask_dict[mask_key]["indices_kept"]
-        kept_indices_tensor = torch.from_numpy(kept_indices).to(device)
+        kept_indices = np.asarray(kept_indices)
+        kept_indices_tensor = torch.from_numpy(kept_indices).long().to(device)
+
+        # Get corresponding conv and bn from pruned model
+        model_conv = _get_nested_attr(model, conv_attr)
+        model_bn = _get_nested_attr(model, bn_attr)
 
         # Get previous layer's kept indices for input channel mapping
-        prev_kept_indices = None
-        if prev_mask_key is not None:
-            if prev_mask_key not in mask_dict:
-                raise ValueError(
-                    f"Previous mask key '{prev_mask_key}' not found in mask_dict for client with weight {weight}."
-                )
-            prev_kept_indices = mask_dict[prev_mask_key]["indices_kept"]
+        prev_kept_indices = get_prev_indices_fn(mask_dict)
 
-        # Navigate to the corresponding layer in the pruned model
-        model_conv, model_bn = _get_conv_bn_from_model(model, mask_key)
-
-        if model_conv is None or model_bn is None:
-            raise ValueError(f"Could not find conv/bn layers for mask_key '{mask_key}' in model.")
-
-        # Vectorized aggregation of Conv2d weights
-        weighted_conv_weights = weight * model_conv.weight.data
+        # Aggregate Conv2d weights (vectorized)
         if prev_kept_indices is None:
-            # First layer or no previous pruning - all input channels present
-            conv_weight_sum.index_add_(0, kept_indices_tensor, weighted_conv_weights)
+            # First layer - all input channels present
+            conv_weight_sum.index_add_(0, kept_indices_tensor, weight * model_conv.weight.data)
             conv_weight_count[kept_indices, :] += weight
         else:
-            # Map input channels using previous layer's mask - fully vectorized
-            # Use meshgrid indexing: [kept_indices[:, None], prev_kept_indices[None, :]]
-            conv_weight_sum[kept_indices[:, None], prev_kept_indices] += weighted_conv_weights
-            conv_weight_count[kept_indices[:, None], prev_kept_indices] += weight
+            # Vectorized: map input channels to original positions using advanced indexing
+            prev_kept_indices = np.asarray(prev_kept_indices)
+            out_grid, in_grid = np.ix_(kept_indices, prev_kept_indices)
+            conv_weight_sum[out_grid, in_grid, :, :] += weight * model_conv.weight.data.cpu().numpy()
+            conv_weight_count[out_grid, in_grid] += weight
 
-        # Vectorized aggregation of Conv2d bias
-        if conv_bias_sum is not None and model_conv.bias is not None:
-            conv_bias_sum.index_add_(0, kept_indices_tensor, weight * model_conv.bias.data)
-            conv_bias_count[kept_indices] += weight
-
-        # Vectorized aggregation of BatchNorm parameters
+        # Aggregate BatchNorm parameters (vectorized using index_add_)
         bn_weight_sum.index_add_(0, kept_indices_tensor, weight * model_bn.weight.data)
         bn_bias_sum.index_add_(0, kept_indices_tensor, weight * model_bn.bias.data)
+        bn_running_mean_sum.index_add_(0, kept_indices_tensor, weight * model_bn.running_mean)
+        bn_running_var_sum.index_add_(0, kept_indices_tensor, weight * model_bn.running_var)
         bn_count[kept_indices] += weight
 
-        # Vectorized aggregation of running stats if they exist
-        if bn_running_mean_sum is not None and hasattr(model_bn, "running_mean") and model_bn.running_mean is not None:
-            bn_running_mean_sum.index_add_(0, kept_indices_tensor, weight * model_bn.running_mean)
-        if bn_running_var_sum is not None and hasattr(model_bn, "running_var") and model_bn.running_var is not None:
-            bn_running_var_sum.index_add_(0, kept_indices_tensor, weight * model_bn.running_var)
-
-    # Apply weighted averages
+    # Apply weighted averages (positions with no contribution remain zero)
     mask = conv_weight_count > 0
     aggregated_conv.weight.data[mask] = conv_weight_sum[mask] / conv_weight_count[mask].unsqueeze(-1).unsqueeze(-1)
-
-    if conv_bias_sum is not None and aggregated_conv.bias is not None:
-        bias_mask = conv_bias_count > 0
-        aggregated_conv.bias.data[bias_mask] = conv_bias_sum[bias_mask] / conv_bias_count[bias_mask]
 
     bn_mask = bn_count > 0
     aggregated_bn.weight.data[bn_mask] = bn_weight_sum[bn_mask] / bn_count[bn_mask]
     aggregated_bn.bias.data[bn_mask] = bn_bias_sum[bn_mask] / bn_count[bn_mask]
-
-    # Update running stats if they exist
-    if (
-        bn_running_mean_sum is not None
-        and hasattr(aggregated_bn, "running_mean")
-        and aggregated_bn.running_mean is not None
-    ):
-        aggregated_bn.running_mean[bn_mask] = bn_running_mean_sum[bn_mask] / bn_count[bn_mask]
-    if (
-        bn_running_var_sum is not None
-        and hasattr(aggregated_bn, "running_var")
-        and aggregated_bn.running_var is not None
-    ):
-        aggregated_bn.running_var[bn_mask] = bn_running_var_sum[bn_mask] / bn_count[bn_mask]
+    aggregated_bn.running_mean[bn_mask] = bn_running_mean_sum[bn_mask] / bn_count[bn_mask]
+    aggregated_bn.running_var[bn_mask] = bn_running_var_sum[bn_mask] / bn_count[bn_mask]
 
 
 def _aggregate_downsample(
-    aggregated_conv: nn.Conv2d,
-    aggregated_bn: nn.Module,
+    aggregated_downsample: nn.Sequential,
     models: List[nn.Module],
     masks: List[Dict],
     weights: List[float],
-    block_prefix: str,
-    output_mask_key: str,
-    input_mask_key: Optional[str] = None,
+    block_key: str,
+    layer_name: str,
+    block_idx: int,
 ):
-    """
-    Aggregate a downsample layer (Conv2d + BatchNorm2d) from multiple models.
+    """Aggregate a downsample layer (Conv2d + BatchNorm2d) from multiple pruned models.
 
-    This is similar to _aggregate_conv_bn but specifically handles the downsample
-    layers within BasicBlocks, which need to be accessed differently in the model structure.
-
-    Args:
-        aggregated_conv: Conv2d layer in aggregated model's downsample
-        aggregated_bn: BatchNorm2d layer in aggregated model's downsample
-        models: List of pruned models
-        masks: List of mask dictionaries
-        weights: Normalized weights for averaging
-        block_prefix: Prefix for the block (e.g., "layer1.0")
-        output_mask_key: Mask key determining output channels (conv2's mask)
-        input_mask_key: Mask key determining input channels (previous layer's mask)
+    Downsample layers follow the block's input indices for input channels
+    and conv2's output indices for output channels.
     """
+    aggregated_conv = aggregated_downsample[0]
+    aggregated_bn = aggregated_downsample[1]
+
     original_out_channels = aggregated_conv.out_channels
     original_in_channels = aggregated_conv.in_channels
     device = aggregated_conv.weight.device
 
-    # Initialize accumulators on correct device
+    # Initialize accumulators
     conv_weight_sum = torch.zeros_like(aggregated_conv.weight.data)
     conv_weight_count = torch.zeros(original_out_channels, original_in_channels, device=device)
-    conv_bias_sum = torch.zeros_like(aggregated_conv.bias.data) if aggregated_conv.bias is not None else None
-    conv_bias_count = torch.zeros(original_out_channels, device=device)
 
     bn_weight_sum = torch.zeros_like(aggregated_bn.weight.data)
     bn_bias_sum = torch.zeros_like(aggregated_bn.bias.data)
-
-    # Handle running stats - they might be None for GroupNorm2d
-    bn_running_mean_sum = (
-        torch.zeros_like(aggregated_bn.running_mean)
-        if hasattr(aggregated_bn, "running_mean") and aggregated_bn.running_mean is not None
-        else None
-    )
-    bn_running_var_sum = (
-        torch.zeros_like(aggregated_bn.running_var)
-        if hasattr(aggregated_bn, "running_var") and aggregated_bn.running_var is not None
-        else None
-    )
+    bn_running_mean_sum = torch.zeros_like(aggregated_bn.running_mean)
+    bn_running_var_sum = torch.zeros_like(aggregated_bn.running_var)
     bn_count = torch.zeros(original_out_channels, device=device)
 
     # Aggregate from each model
     for model, mask_dict, weight in zip(models, masks, weights):
-        if output_mask_key not in mask_dict:
-            raise ValueError(
-                f"Output mask key '{output_mask_key}' not found in mask_dict for client with weight {weight}."
-            )
+        # Output indices come from conv2 of this block
+        out_indices = mask_dict[f"{block_key}.conv2"]["indices_kept"]
+        out_indices = np.asarray(out_indices)
+        out_indices_tensor = torch.from_numpy(out_indices).long().to(device)
 
-        output_kept_indices = mask_dict[output_mask_key]["indices_kept"]
-        output_indices_tensor = torch.from_numpy(output_kept_indices).to(device)
+        # Input indices come from the previous layer (block input)
+        in_indices = _get_previous_layer_indices_resnet(f"{block_key}.conv1", mask_dict)
 
-        # Get input layer's kept indices
-        input_kept_indices = None
-        if input_mask_key is not None:
-            if input_mask_key not in mask_dict:
-                raise ValueError(
-                    f"Input mask key '{input_mask_key}' not found in mask_dict for client with weight {weight}."
-                )
-            input_kept_indices = mask_dict[input_mask_key]["indices_kept"]
+        # Get corresponding downsample from pruned model
+        model_block = _get_nested_attr(model, f"{layer_name}.{block_idx}")
+        model_conv = model_block.downsample[0]
+        model_bn = model_block.downsample[1]
 
-        # Navigate to the downsample layer in the pruned model
-        parts = block_prefix.split(".")
-        layer_name = parts[0]  # e.g., "layer1"
-        block_idx = int(parts[1])  # e.g., 0
-
-        layer = getattr(model, layer_name)
-        block = layer[block_idx]
-
-        if block.downsample is None:
-            continue
-
-        model_conv = block.downsample[0]
-        model_bn = block.downsample[1]
-
-        # Vectorized aggregation of Conv2d weights
-        weighted_conv_weights = weight * model_conv.weight.data
-        if input_kept_indices is None:
-            # First layer or no previous pruning - all input channels present
-            conv_weight_sum.index_add_(0, output_indices_tensor, weighted_conv_weights)
-            conv_weight_count[output_kept_indices, :] += weight
+        # Aggregate Conv2d weights (vectorized)
+        if in_indices is None:
+            # First block input from conv1 (shouldn't happen for downsample, but handle it)
+            conv_weight_sum.index_add_(0, out_indices_tensor, weight * model_conv.weight.data)
+            conv_weight_count[out_indices, :] += weight
         else:
-            # Map input channels using previous layer's mask - fully vectorized
-            # Use meshgrid indexing: [output_kept_indices[:, None], input_kept_indices[None, :]]
-            conv_weight_sum[output_kept_indices[:, None], input_kept_indices] += weighted_conv_weights
-            conv_weight_count[output_kept_indices[:, None], input_kept_indices] += weight
+            # Vectorized: map input channels to original positions using advanced indexing
+            in_indices = np.asarray(in_indices)
+            out_grid, in_grid = np.ix_(out_indices, in_indices)
+            conv_weight_sum[out_grid, in_grid, :, :] += weight * model_conv.weight.data.cpu().numpy()
+            conv_weight_count[out_grid, in_grid] += weight
 
-        # Vectorized aggregation of Conv2d bias
-        if conv_bias_sum is not None and model_conv.bias is not None:
-            conv_bias_sum.index_add_(0, output_indices_tensor, weight * model_conv.bias.data)
-            conv_bias_count[output_kept_indices] += weight
-
-        # Vectorized aggregation of BatchNorm parameters
-        bn_weight_sum.index_add_(0, output_indices_tensor, weight * model_bn.weight.data)
-        bn_bias_sum.index_add_(0, output_indices_tensor, weight * model_bn.bias.data)
-        bn_count[output_kept_indices] += weight
-
-        # Vectorized aggregation of running stats if they exist
-        if bn_running_mean_sum is not None and hasattr(model_bn, "running_mean") and model_bn.running_mean is not None:
-            bn_running_mean_sum.index_add_(0, output_indices_tensor, weight * model_bn.running_mean)
-        if bn_running_var_sum is not None and hasattr(model_bn, "running_var") and model_bn.running_var is not None:
-            bn_running_var_sum.index_add_(0, output_indices_tensor, weight * model_bn.running_var)
+        # Aggregate BatchNorm parameters (vectorized using index_add_)
+        bn_weight_sum.index_add_(0, out_indices_tensor, weight * model_bn.weight.data)
+        bn_bias_sum.index_add_(0, out_indices_tensor, weight * model_bn.bias.data)
+        bn_running_mean_sum.index_add_(0, out_indices_tensor, weight * model_bn.running_mean)
+        bn_running_var_sum.index_add_(0, out_indices_tensor, weight * model_bn.running_var)
+        bn_count[out_indices] += weight
 
     # Apply weighted averages
     mask = conv_weight_count > 0
     aggregated_conv.weight.data[mask] = conv_weight_sum[mask] / conv_weight_count[mask].unsqueeze(-1).unsqueeze(-1)
 
-    if conv_bias_sum is not None and aggregated_conv.bias is not None:
-        bias_mask = conv_bias_count > 0
-        aggregated_conv.bias.data[bias_mask] = conv_bias_sum[bias_mask] / conv_bias_count[bias_mask]
-
     bn_mask = bn_count > 0
     aggregated_bn.weight.data[bn_mask] = bn_weight_sum[bn_mask] / bn_count[bn_mask]
     aggregated_bn.bias.data[bn_mask] = bn_bias_sum[bn_mask] / bn_count[bn_mask]
-
-    # Update running stats if they exist
-    if (
-        bn_running_mean_sum is not None
-        and hasattr(aggregated_bn, "running_mean")
-        and aggregated_bn.running_mean is not None
-    ):
-        aggregated_bn.running_mean[bn_mask] = bn_running_mean_sum[bn_mask] / bn_count[bn_mask]
-    if (
-        bn_running_var_sum is not None
-        and hasattr(aggregated_bn, "running_var")
-        and aggregated_bn.running_var is not None
-    ):
-        aggregated_bn.running_var[bn_mask] = bn_running_var_sum[bn_mask] / bn_count[bn_mask]
+    aggregated_bn.running_mean[bn_mask] = bn_running_mean_sum[bn_mask] / bn_count[bn_mask]
+    aggregated_bn.running_var[bn_mask] = bn_running_var_sum[bn_mask] / bn_count[bn_mask]
 
 
-def _get_conv_bn_from_model(model: nn.Module, mask_key: str):
-    """
-    Navigate the model structure to get Conv2d and BatchNorm2d layers based on mask_key.
-
-    Args:
-        model: The pruned model
-        mask_key: Key like "conv1", "layer1.0.conv1", "layer2.1.conv2", etc.
-
-    Returns:
-        Tuple of (Conv2d, BatchNorm2d) or (None, None) if not found
-    """
-    parts = mask_key.split(".")
-
-    if parts[0] == "conv1":
-        # Initial conv layer
-        return model.conv1, model.bn1
-
-    elif parts[0].startswith("layer"):
-        # Layer block convolution
-        # Format: layer1.0.conv1 -> layer1[0].conv1, layer1[0].bn1
-        layer_name = parts[0]  # e.g., "layer1"
-        block_idx = int(parts[1])  # e.g., 0
-        conv_name = parts[2]  # e.g., "conv1" or "conv2"
-
-        layer = getattr(model, layer_name)
-        block = layer[block_idx]
-
-        if conv_name == "conv1":
-            return block.conv1, block.bn1
-        elif conv_name == "conv2":
-            return block.conv2, block.bn2
-
-    return None, None
-
-
-def _aggregate_linear_layer(
-    aggregated_linear: nn.Linear,
+def _aggregate_fc_layer(
+    aggregated_fc: nn.Linear,
     models: List[nn.Module],
     masks: List[Dict],
     weights: List[float],
-    last_conv_mask_key: str,
 ):
+    """Aggregate the final fully connected layer from multiple pruned models.
+
+    The FC layer input features correspond to the output of layer4.1.conv2 after pooling.
     """
-    Aggregate the final linear layer from multiple models.
+    original_in_features = aggregated_fc.in_features
+    original_out_features = aggregated_fc.out_features
+    device = aggregated_fc.weight.device
 
-    Args:
-        aggregated_linear: Linear layer in aggregated model
-        models: List of pruned models
-        masks: List of mask dictionaries
-        weights: Normalized weights for averaging
-        last_conv_mask_key: Mask key of the last convolutional layer
-    """
-    original_in_features = aggregated_linear.in_features
-    original_out_features = aggregated_linear.out_features
-    device = aggregated_linear.weight.device
+    # Initialize accumulators
+    fc_weight_sum = torch.zeros_like(aggregated_fc.weight.data)
+    fc_weight_count = torch.zeros(original_out_features, original_in_features, device=device)
+    fc_bias_sum = torch.zeros_like(aggregated_fc.bias.data) if aggregated_fc.bias is not None else None
+    fc_bias_count = torch.zeros(original_out_features, device=device) if aggregated_fc.bias is not None else None
 
-    # Initialize accumulators on correct device
-    linear_weight_sum = torch.zeros_like(aggregated_linear.weight.data)
-    linear_weight_count = torch.zeros(original_out_features, original_in_features, device=device)
-    linear_bias_sum = torch.zeros_like(aggregated_linear.bias.data) if aggregated_linear.bias is not None else None
-    linear_bias_count = torch.zeros(original_out_features, device=device)
+    # The last conv layer is layer4.1.conv2
+    last_conv_mask_key = "layer4.1.conv2"
 
-    # Aggregate from each model
     for model, mask_dict, weight in zip(models, masks, weights):
-        if last_conv_mask_key not in mask_dict:
-            raise ValueError(f"{last_conv_mask_key} not present in mask for a client with {weight} samples.")
+        last_conv_indices = mask_dict[last_conv_mask_key]["indices_kept"]
+        last_conv_indices = np.asarray(last_conv_indices)
 
-        last_conv_kept_indices = mask_dict[last_conv_mask_key]["indices_kept"]
-        model_linear = model.fc
+        model_fc = model.fc
 
-        # Vectorized aggregation: In ResNet, the avgpool reduces spatial dimensions to 1x1
-        # So each filter in the last conv layer contributes exactly 1 feature to the linear layer
-        linear_weight_sum[:, last_conv_kept_indices] += weight * model_linear.weight.data
-        linear_weight_count[:, last_conv_kept_indices] += weight
+        # FC layer: weight shape is [out_features, in_features]
+        # After adaptive avg pooling, each kept filter becomes one input feature
+        fc_weight_sum[:, last_conv_indices] += weight * model_fc.weight.data
+        fc_weight_count[:, last_conv_indices] += weight
 
-        # Aggregate bias (vectorized)
-        if linear_bias_sum is not None and model_linear.bias is not None:
-            linear_bias_sum += weight * model_linear.bias.data
-            linear_bias_count += weight
+        if fc_bias_sum is not None and model_fc.bias is not None:
+            fc_bias_sum += weight * model_fc.bias.data
+            fc_bias_count += weight
 
     # Apply weighted averages
-    mask = linear_weight_count > 0
-    aggregated_linear.weight.data[mask] = linear_weight_sum[mask] / linear_weight_count[mask]
+    mask = fc_weight_count > 0
+    aggregated_fc.weight.data[mask] = fc_weight_sum[mask] / fc_weight_count[mask]
 
-    if linear_bias_sum is not None:
-        bias_mask = linear_bias_count > 0
-        aggregated_linear.bias.data[bias_mask] = linear_bias_sum[bias_mask] / linear_bias_count[bias_mask]
+    if fc_bias_sum is not None and fc_bias_count is not None:
+        bias_mask = fc_bias_count > 0
+        aggregated_fc.bias.data[bias_mask] = fc_bias_sum[bias_mask] / fc_bias_count[bias_mask]
+
+
+def _get_nested_attr(obj, attr_path: str):
+    """Get nested attribute from object using dot-separated path."""
+    attrs = attr_path.split(".")
+    for attr in attrs:
+        if attr.isdigit():
+            obj = obj[int(attr)]
+        else:
+            obj = getattr(obj, attr)
+    return obj
+
+
+def _get_previous_layer_indices_resnet(current_layer_name: str, mask_dict: Dict):
+    """
+    Get the indices of kept filters from the previous layer in ResNet18.
+
+    Args:
+        current_layer_name: Name of the current layer (e.g., "layer1.0.conv1", "layer2.1.conv2")
+        mask_dict: Dictionary containing mask information for each layer
+
+    Returns:
+        np.ndarray of kept indices from the previous layer, or None if first layer
+    """
+    if current_layer_name == "conv1":
+        # First conv layer - no previous layer (RGB input)
+        return None
+
+    # Parse the layer name
+    parts = current_layer_name.split(".")
+
+    if parts[0] in ["layer1", "layer2", "layer3", "layer4"]:
+        layer_name = parts[0]
+        block_idx = int(parts[1])
+        conv_name = parts[2]  # "conv1" or "conv2"
+
+        if conv_name == "conv1":
+            # conv1 takes input from previous block's output (conv2)
+            if block_idx == 0:
+                # First block in layer - input from previous layer's last block
+                if layer_name == "layer1":
+                    # Input from initial conv1
+                    return mask_dict["conv1"]["indices_kept"]
+                elif layer_name == "layer2":
+                    return mask_dict["layer1.1.conv2"]["indices_kept"]
+                elif layer_name == "layer3":
+                    return mask_dict["layer2.1.conv2"]["indices_kept"]
+                elif layer_name == "layer4":
+                    return mask_dict["layer3.1.conv2"]["indices_kept"]
+            else:
+                # Input from previous block's conv2 in same layer
+                return mask_dict[f"{layer_name}.{block_idx - 1}.conv2"]["indices_kept"]
+        elif conv_name == "conv2":
+            # conv2 takes input from conv1 of the same block
+            return mask_dict[f"{layer_name}.{block_idx}.conv1"]["indices_kept"]
+
+    raise ValueError(f"Unrecognized layer name: {current_layer_name}")
