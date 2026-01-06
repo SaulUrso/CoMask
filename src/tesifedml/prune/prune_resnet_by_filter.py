@@ -39,8 +39,9 @@ def prune_conv(
         if (
             len(weight_copy) <= minimum_channels
         ):  # NOTE: present in original code, specifies min number of filter in a layer
-            # just specify the indices of the filters maintained, which is the same as no pruning hapened
-            out_idx = np.arange(minimum_channels)
+            # just specify the indices of the filters maintained, which is the same as no pruning happened
+            # Use actual layer size, not minimum_channels, to avoid index out of bounds
+            out_idx = np.arange(len(weight_copy))
             mask = torch.ones(len(weight_copy))
 
         else:
@@ -304,8 +305,7 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, w
         threshold = None
         # Calculate units pruned from mask
         units_pruned = sum(
-            mask_info["original_filters"] - mask_info["pruned_filters"] 
-            for mask_info in with_mask.values()
+            mask_info["original_filters"] - mask_info["pruned_filters"] for mask_info in with_mask.values()
         )
 
     # Calculate original parameters for comparison
@@ -327,10 +327,7 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, w
         group_pruning_ratio = (total_groups - new_total_groups) / total_groups if total_groups is not None else None
     else:
         # Recalculate actual units pruned from resulting masks
-        units_pruned = sum(
-            mask_info["original_filters"] - mask_info["pruned_filters"] 
-            for mask_info in masks.values()
-        )
+        units_pruned = sum(mask_info["original_filters"] - mask_info["pruned_filters"] for mask_info in masks.values())
 
     total_params_after = count_parameters(model)
     param_pruning_ratio = (total_params_before - total_params_after) / total_params_before
