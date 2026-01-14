@@ -20,10 +20,6 @@ wheels/
 log*
 wandb
 *.log
-*.yaml
-!sweep_config.yaml
-!femnist_config.yaml
-!har_cluster_config.yaml
 
 #tests
 test*

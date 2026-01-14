@@ -1,0 +1,30 @@
+program: scripts/cluster_prune_script.py 
+method: grid  # or 'grid', 'random'
+metric:
+  name: Server/Test/Acc  # FedML typically logs as 'test/acc' or 'test_acc'
+  goal: maximize
+
+parameters:
+  train_args:
+    parameters:
+      preference:
+        values : [-90,-60,-23]
+
+      pruning:
+        values : ["proposal"]
+
+      ssl_coefficient: 
+        values : [0.000001]
+
+      accuracy_threshold:
+        values : [0.45,0.4,0.5]
+      
+command:
+  - uv
+  - run
+  - --env-file
+  - .env
+  - --
+  - ${program}
+  - --cf
+  - configs/cifar_config.yaml

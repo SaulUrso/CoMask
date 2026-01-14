@@ -1,0 +1,44 @@
+program: scripts/cluster_prune_script.py 
+method: grid  # or 'grid', 'random'
+metric:
+  name: Server/Test/Acc  # FedML typically logs as 'test/acc' or 'test_acc'
+  goal: maximize
+
+parameters:
+  train_args:
+    parameters:
+      preference:
+        values : [-90] # [-200, -90, -43]
+      
+      pruning: 
+        values : ["proposal"]
+
+      ssl_coefficient:
+        values: [0.0001]
+
+      accuracy_threshold:
+        values : [0.1]
+
+      prune_percent: 
+        values: [0.1]
+
+      consolidation_percentage: 
+        values: [0.1]
+
+      consensus_percentage: 
+        values: [0.1,0.3,0.5,0.7]
+
+  device_args:
+    parameters:
+      gpu_id: 
+        values: [0]
+        
+command:
+  - uv
+  - run
+  - --env-file
+  - .env
+  - --
+  - ${program}
+  - --cf
+  - configs/femnist_config.yaml
