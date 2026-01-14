@@ -38,18 +38,18 @@ def aggregate_resnet_with_masks(
     assert len(models) == len(masks) == len(counters), "Models, masks, and counters must have same length"
     assert len(models) > 0, "Must provide at least one model"
 
-    # Normalize counters to sum to 1 (for weighted averaging)
+    # Normalize counters to sum to 1
     total_count = sum(counters)
     weights = [c / total_count for c in counters]
 
-    # Create a new unpruned model as template for aggregation
+
     aggregated_model = resnet18_cifar(num_classes=num_classes)
 
-    # Initialize all parameters to zero
+    # Initialize all parameters to zero 
+    # (should not be necessary but it was done for debugging)
     with torch.no_grad():
         for param in aggregated_model.parameters():
             param.zero_()
-        # Also zero out running stats in BatchNorm layers
         for module in aggregated_model.modules():
             if isinstance(module, nn.BatchNorm2d):
                 module.running_mean.zero_()
@@ -68,7 +68,7 @@ def aggregate_resnet_with_masks(
         get_prev_indices_fn=lambda mask_dict: None,  # First layer, no previous
     )
 
-    # Aggregate each layer (layer1, layer2, layer3, layer4)
+    # Aggregate each layer+
     for layer_name in ["layer1", "layer2", "layer3", "layer4"]:
         aggregated_layer = getattr(aggregated_model, layer_name)
 
@@ -101,7 +101,7 @@ def aggregate_resnet_with_masks(
                 get_prev_indices_fn=lambda md, bk=block_key: md[f"{bk}.conv1"]["indices_kept"],
             )
 
-            # Aggregate downsample if present
+            # Aggregate downsample (if present;it should be to work correctly)
             if aggregated_block.downsample is not None:
                 _aggregate_downsample(
                     aggregated_block.downsample,
@@ -112,8 +112,6 @@ def aggregate_resnet_with_masks(
                     layer_name=layer_name,
                     block_idx=block_idx,
                 )
-
-    # Aggregate the final fully connected layer
     _aggregate_fc_layer(
         aggregated_model.fc,
         models,
@@ -156,33 +154,30 @@ def _aggregate_conv_bn(
         kept_indices = np.asarray(kept_indices)
         kept_indices_tensor = torch.from_numpy(kept_indices).long().to(device)
 
-        # Get corresponding conv and bn from pruned model
         model_conv = _get_nested_attr(model, conv_attr)
         model_bn = _get_nested_attr(model, bn_attr)
 
-        # Get previous layer's kept indices for input channel mapping
         prev_kept_indices = get_prev_indices_fn(mask_dict)
 
-        # Aggregate Conv2d weights (vectorized)
+        # Aggregate Conv2d weights
         if prev_kept_indices is None:
             # First layer - all input channels present
             conv_weight_sum.index_add_(0, kept_indices_tensor, weight * model_conv.weight.data)
             conv_weight_count[kept_indices, :] += weight
         else:
-            # Vectorized: map input channels to original positions using advanced indexing
             prev_kept_indices = np.asarray(prev_kept_indices)
             out_grid, in_grid = np.ix_(kept_indices, prev_kept_indices)
             conv_weight_sum[out_grid, in_grid, :, :] += weight * model_conv.weight.data.cpu().numpy()
             conv_weight_count[out_grid, in_grid] += weight
 
-        # Aggregate BatchNorm parameters (vectorized using index_add_)
+        # Aggregate BatchNorm
         bn_weight_sum.index_add_(0, kept_indices_tensor, weight * model_bn.weight.data)
         bn_bias_sum.index_add_(0, kept_indices_tensor, weight * model_bn.bias.data)
         bn_running_mean_sum.index_add_(0, kept_indices_tensor, weight * model_bn.running_mean)
         bn_running_var_sum.index_add_(0, kept_indices_tensor, weight * model_bn.running_var)
         bn_count[kept_indices] += weight
 
-    # Apply weighted averages (positions with no contribution remain zero)
+    # Apply weighted averages
     mask = conv_weight_count > 0
     aggregated_conv.weight.data[mask] = conv_weight_sum[mask] / conv_weight_count[mask].unsqueeze(-1).unsqueeze(-1)
 
@@ -239,19 +234,18 @@ def _aggregate_downsample(
         model_conv = model_block.downsample[0]
         model_bn = model_block.downsample[1]
 
-        # Aggregate Conv2d weights (vectorized)
+        # Aggregate Conv2d weights
         if in_indices is None:
             # First block input from conv1 (shouldn't happen for downsample, but handle it)
             conv_weight_sum.index_add_(0, out_indices_tensor, weight * model_conv.weight.data)
             conv_weight_count[out_indices, :] += weight
         else:
-            # Vectorized: map input channels to original positions using advanced indexing
             in_indices = np.asarray(in_indices)
             out_grid, in_grid = np.ix_(out_indices, in_indices)
             conv_weight_sum[out_grid, in_grid, :, :] += weight * model_conv.weight.data.cpu().numpy()
             conv_weight_count[out_grid, in_grid] += weight
 
-        # Aggregate BatchNorm parameters (vectorized using index_add_)
+        # Aggregate BatchNorm
         bn_weight_sum.index_add_(0, out_indices_tensor, weight * model_bn.weight.data)
         bn_bias_sum.index_add_(0, out_indices_tensor, weight * model_bn.bias.data)
         bn_running_mean_sum.index_add_(0, out_indices_tensor, weight * model_bn.running_mean)

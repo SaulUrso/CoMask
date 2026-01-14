@@ -50,25 +50,22 @@ def aggregate_mobilenet_with_masks(
     total_count = sum(counters)
     weights = [c / total_count for c in counters]
 
-    # Create a new unpruned model as template for aggregation
+
     aggregated_model = MobileNet(class_num=class_num)
 
-    # Iterate over all named modules in the aggregated model
+
     for name, module in aggregated_model.named_modules():
         if name == "":  # Skip root module
             continue
 
-        # Handle BasicConv2d blocks
         if isinstance(module, BasicConv2d):
             mask_key = f"{name}.conv"
             _aggregate_basic_conv2d(module, models, masks, weights, mask_key, name)
 
-        # Handle DepthSeparableConv2d blocks
         elif isinstance(module, DepthSeperabelConv2d):
             mask_key = f"{name}.pointwise.0"
             _aggregate_depth_separable_conv2d(module, models, masks, weights, mask_key, name)
 
-        # Handle linear layer
         elif isinstance(module, nn.Linear) and name == "fc":
             _aggregate_linear_layer(module, models, masks, weights)
 
@@ -84,7 +81,7 @@ def _aggregate_basic_conv2d(aggregated_block, models, masks, weights, mask_key, 
     original_in_channels = aggregated_conv.in_channels
     device = aggregated_conv.weight.device
 
-    # Initialize accumulators on the correct device
+    # Initialize accumulators
     conv_weight_sum = torch.zeros_like(aggregated_conv.weight.data)
     conv_weight_count = torch.zeros(original_out_channels, original_in_channels, device=device)
     conv_bias_sum = torch.zeros_like(aggregated_conv.bias.data) if aggregated_conv.bias is not None else None
@@ -96,7 +93,6 @@ def _aggregate_basic_conv2d(aggregated_block, models, masks, weights, mask_key, 
     bn_running_var_sum = torch.zeros_like(aggregated_bn.running_var)
     bn_count = torch.zeros(original_out_channels, device=device)
 
-    # Aggregate from each model
     for model, mask_dict, weight in zip(models, masks, weights):
         if mask_key not in mask_dict:
             raise ValueError(f"Mask key '{mask_key}' not found in mask_dict for client with weight {weight}.")
@@ -109,36 +105,30 @@ def _aggregate_basic_conv2d(aggregated_block, models, masks, weights, mask_key, 
         model_conv = model_block.conv
         model_bn = model_block.bn
 
-        # Get previous layer's kept indices for input channel mapping
         prev_kept_indices = _get_previous_layer_indices(block_name, mask_dict)
 
-        # Vectorized aggregation of Conv2d weights
         if prev_kept_indices is None:
             # First layer - all input channels present
             conv_weight_sum.index_add_(0, kept_indices_tensor, weight * model_conv.weight.data)
             conv_weight_count[kept_indices, :] += weight
         else:
-            # Map input channels using previous layer's mask
-            prev_indices_tensor = torch.from_numpy(prev_kept_indices).to(device)
-            # Use advanced indexing for vectorized update
+
             weighted_weights = weight * model_conv.weight.data
             for i, orig_out_idx in enumerate(kept_indices):
                 conv_weight_sum[orig_out_idx, prev_kept_indices, :, :] += weighted_weights[i, :, :, :]
                 conv_weight_count[orig_out_idx, prev_kept_indices] += weight
 
-        # Vectorized aggregation of Conv2d bias
         if conv_bias_sum is not None and model_conv.bias is not None:
             conv_bias_sum.index_add_(0, kept_indices_tensor, weight * model_conv.bias.data)
             conv_bias_count[kept_indices] += weight
 
-        # Vectorized aggregation of BatchNorm parameters
+        # Aggregation of BatchNorm parameters
         bn_weight_sum.index_add_(0, kept_indices_tensor, weight * model_bn.weight.data)
         bn_bias_sum.index_add_(0, kept_indices_tensor, weight * model_bn.bias.data)
         bn_running_mean_sum.index_add_(0, kept_indices_tensor, weight * model_bn.running_mean)
         bn_running_var_sum.index_add_(0, kept_indices_tensor, weight * model_bn.running_var)
         bn_count[kept_indices] += weight
 
-    # Apply weighted averages
     mask = conv_weight_count > 0
     aggregated_conv.weight.data[mask] = conv_weight_sum[mask] / conv_weight_count[mask].unsqueeze(-1).unsqueeze(-1)
 
@@ -161,7 +151,6 @@ def _aggregate_depth_separable_conv2d(aggregated_block, models, masks, weights, 
     aggregated_pointwise_conv = aggregated_block.pointwise[0]
     aggregated_pointwise_bn = aggregated_block.pointwise[1]
 
-    # Get dimensions
     original_in_channels = aggregated_depthwise_conv.in_channels  # == out_channels for depthwise
     original_out_channels = aggregated_pointwise_conv.out_channels
     device = aggregated_pointwise_conv.weight.device
@@ -195,7 +184,7 @@ def _aggregate_depth_separable_conv2d(aggregated_block, models, masks, weights, 
     pointwise_bn_running_var_sum = torch.zeros_like(aggregated_pointwise_bn.running_var)
     pointwise_bn_count = torch.zeros(original_out_channels, device=device)
 
-    # Aggregate from each model
+    # Aggregate
     for model, mask_dict, weight in zip(models, masks, weights):
         if mask_key not in mask_dict:
             raise ValueError(f"Mask key {mask_key} not found for client with {weight} samples.")
@@ -212,7 +201,7 @@ def _aggregate_depth_separable_conv2d(aggregated_block, models, masks, weights, 
         # Get previous layer's kept indices for input channel mapping
         prev_kept_indices = _get_previous_layer_indices(block_name, mask_dict)
 
-        # Vectorized aggregation of depthwise conv
+        # Aaggregation of depthwise conv
         if prev_kept_indices is not None:
             prev_indices_tensor = torch.from_numpy(prev_kept_indices).to(device)
 
@@ -224,7 +213,7 @@ def _aggregate_depth_separable_conv2d(aggregated_block, models, masks, weights, 
                 depthwise_bias_sum.index_add_(0, prev_indices_tensor, weight * model_depthwise_conv.bias.data)
                 depthwise_bias_count[prev_kept_indices] += weight
 
-            # Vectorized depthwise BatchNorm aggregation
+            # Depthwise BatchNorm aggregation
             depthwise_bn_weight_sum.index_add_(0, prev_indices_tensor, weight * model_depthwise_bn.weight.data)
             depthwise_bn_bias_sum.index_add_(0, prev_indices_tensor, weight * model_depthwise_bn.bias.data)
             depthwise_bn_running_mean_sum.index_add_(0, prev_indices_tensor, weight * model_depthwise_bn.running_mean)
@@ -233,7 +222,7 @@ def _aggregate_depth_separable_conv2d(aggregated_block, models, masks, weights, 
         else:
             raise ValueError(f"prev_kept_indices is {None}, but layer {block_name} is not the first one.")
 
-        # Vectorized aggregation of pointwise conv (this is where output pruning happens)
+        # Aggregation of pointwise conv (this is where output pruning happens)
         kept_indices_tensor = torch.from_numpy(kept_indices).to(device)
         weighted_pointwise_weights = weight * model_pointwise_conv.weight.data
 
@@ -249,19 +238,19 @@ def _aggregate_depth_separable_conv2d(aggregated_block, models, masks, weights, 
             pointwise_weight_sum[kept_indices] += weighted_pointwise_weights
             pointwise_weight_count[kept_indices, :] += weight
 
-        # Vectorized aggregation of pointwise bias
+        # Aggregation of pointwise bias
         if pointwise_bias_sum is not None and model_pointwise_conv.bias is not None:
             pointwise_bias_sum.index_add_(0, kept_indices_tensor, weight * model_pointwise_conv.bias.data)
             pointwise_bias_count[kept_indices] += weight
 
-        # Vectorized aggregation of pointwise BatchNorm
+        # Aggregation of pointwise BatchNorm
         pointwise_bn_weight_sum.index_add_(0, kept_indices_tensor, weight * model_pointwise_bn.weight.data)
         pointwise_bn_bias_sum.index_add_(0, kept_indices_tensor, weight * model_pointwise_bn.bias.data)
         pointwise_bn_running_mean_sum.index_add_(0, kept_indices_tensor, weight * model_pointwise_bn.running_mean)
         pointwise_bn_running_var_sum.index_add_(0, kept_indices_tensor, weight * model_pointwise_bn.running_var)
         pointwise_bn_count[kept_indices] += weight
 
-    # Apply weighted averages for depthwise conv (vectorized)
+    # Apply weighted averages for depthwise conv
     depthwise_mask = depthwise_weight_count > 0
     if depthwise_mask.any():
         # Reshape count for broadcasting: [N, 1, 1, 1]
@@ -323,7 +312,7 @@ def _aggregate_linear_layer(aggregated_linear, models, masks, weights):
     original_out_features = aggregated_linear.out_features
     device = aggregated_linear.weight.device
 
-    # Initialize accumulators on correct device
+    # Initialize accumulators
     linear_weight_sum = torch.zeros_like(aggregated_linear.weight.data)
     linear_weight_count = torch.zeros(original_out_features, original_in_features, device=device)
     linear_bias_sum = torch.zeros_like(aggregated_linear.bias.data) if aggregated_linear.bias is not None else None
@@ -340,12 +329,12 @@ def _aggregate_linear_layer(aggregated_linear, models, masks, weights):
         last_conv_kept_indices = mask_dict[last_conv_mask_key]["indices_kept"]
         model_linear = model.fc
 
-        # Vectorized aggregation: The linear layer input is the output of adaptive avg pooling
+        # The linear layer input is the output of adaptive avg pooling
         # So each kept filter contributes 1 feature to the linear layer
         linear_weight_sum[:, last_conv_kept_indices] += weight * model_linear.weight.data
         linear_weight_count[:, last_conv_kept_indices] += weight
 
-        # Aggregate bias (vectorized)
+        # Aggregate bias
         if linear_bias_sum is not None and model_linear.bias is not None:
             linear_bias_sum += weight * model_linear.bias.data
             linear_bias_count += weight
@@ -391,7 +380,7 @@ def _get_previous_layer_indices(current_layer_name, mask_dict):
         block_idx = int(parts[1])  # e.g., 0, 1
 
         if block_idx == 0:
-            # First block in this conv group - previous is from previous group
+            # First block in this conv group -> previous is from previous group
             if block_name == "conv2":
                 prev_key = "conv1.1.pointwise.0"
             elif block_name == "conv3":
@@ -399,7 +388,7 @@ def _get_previous_layer_indices(current_layer_name, mask_dict):
             elif block_name == "conv4":
                 prev_key = "conv3.5.pointwise.0"
             else:
-                # Shouldn't happen, but handle gracefully
+                # Shouldn't happen
                 raise ValueError(f"Block name {block_name} not recognized.")
         else:
             # Previous block in same group

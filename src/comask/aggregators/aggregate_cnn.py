@@ -46,10 +46,10 @@ def aggregate_cnn_with_masks(
     total_count = sum(counters)
     weights = [c / total_count for c in counters]
 
-    # Create a new unpruned model as template for aggregation
+
     aggregated_model = HARBox_CNN()
 
-    # Iterate over all named modules in the aggregated model
+
     for name, module in aggregated_model.named_modules():
         if name == "":  # Skip root module
             continue
@@ -108,7 +108,7 @@ def _aggregate_conv_block(aggregated_conv, aggregated_bn, models, masks, weights
 
         # Aggregate each kept filter
         for pruned_idx, original_idx in enumerate(kept_indices):
-            # Aggregate Conv2d weights
+            
             if prev_kept_indices is None:
                 # First layer - all input channels present
                 conv_weight_sum[original_idx, :, :, :] += weight * model_conv.weight.data[pruned_idx, :, :, :]
@@ -121,7 +121,7 @@ def _aggregate_conv_block(aggregated_conv, aggregated_bn, models, masks, weights
                     )
                     conv_weight_count[original_idx, original_in_idx] += weight
 
-            # Aggregate Conv2d bias
+            
             if conv_bias_sum is not None:
                 conv_bias_sum[original_idx] += weight * model_conv.bias.data[pruned_idx]
                 conv_bias_count[original_idx] += weight
@@ -133,7 +133,7 @@ def _aggregate_conv_block(aggregated_conv, aggregated_bn, models, masks, weights
             bn_running_var_sum[original_idx] += weight * model_bn.running_var[pruned_idx]
             bn_count[original_idx] += weight
 
-    # Apply weighted averages using vectorized operations where possible
+
     mask = conv_weight_count > 0
     aggregated_conv.weight.data[mask] = conv_weight_sum[mask] / conv_weight_count[mask].unsqueeze(-1).unsqueeze(-1)
 
@@ -187,7 +187,6 @@ def _aggregate_linear_layer(aggregated_linear, models, masks, weights):
             linear_bias_sum += weight * model_linear.bias.data
             linear_bias_count += weight
 
-    # Apply weighted averages
     mask = linear_weight_count > 0
     aggregated_linear.weight.data[mask] = linear_weight_sum[mask] / linear_weight_count[mask]
 
