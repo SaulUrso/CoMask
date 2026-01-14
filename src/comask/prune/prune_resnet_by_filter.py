@@ -8,12 +8,13 @@ from comask.prune.keywords import KEY_FILTER
 from comask.prune.utils import (
     computer_conv_threshold,
     computer_weight,
+    count_parameters,
     create_batchnorm2d,
     create_conv2d,
     create_linear,
     round_to_multiple_of,
 )
-
+from comask.models.resnet_cifar import BasicBlock
 
 def prune_conv(
     old_conv2d: nn.Conv2d,
@@ -30,7 +31,7 @@ def prune_conv(
         # Use provided mask
         mask = layer_mask["mask"]
         out_idx = np.array(layer_mask["indices_kept"])
-        if len(out_idx.shape) == 0:  # Handle single index case
+        if len(out_idx.shape) == 0:
             out_idx = np.array([out_idx])
     else:
         # Calculate mask based on threshold
@@ -135,10 +136,9 @@ def prune_basic_block(
         layer_mask=conv1_layer_mask,
     )
 
-    # store mast first conv
     block_masks["conv1"] = mask_1
 
-    # Prune conv2 - input channels match conv1 output
+    # Prune conv2 (input channels match conv1 output)
     conv2_layer_mask = with_mask["conv2"] if with_mask else None
     new_conv2, new_bn2, out_channels_2, out_idx_2, mask_2 = prune_conv(
         old_block.conv2,
@@ -189,9 +189,6 @@ def prune_basic_block(
             f"Downsample conv out_channels mismatch: expected {out_channels_2}, got {new_downsample_conv.out_channels}"
         )
 
-    # Create new BasicBlock
-    from fedml.model.cv.resnet_cifar import BasicBlock
-
     # For ResNet, the 'planes' parameter should be the output channels of conv2
     # This ensures identity and main path have matching dimensions
     new_block = BasicBlock(in_channels, out_channels_2, stride=old_block.conv1.stride[0], downsample=new_downsample)
@@ -217,7 +214,7 @@ def prune_resnet_features(model, conv_threshold, prune_way, minimum_channels=1, 
         model.bn1,
         conv_threshold,
         prune_way,
-        in_channels=3,  # RGB input
+        in_channels=3, 
         in_idx=None,
         minimum_channels=minimum_channels,
         divisor=divisor,
@@ -277,7 +274,6 @@ def prune_resnet_classifier(model, in_channels, in_idx):
     old_fc = model.fc
 
     # due to pooling you actually don't have to do anything
-
     # Create new linear layer with adjusted input size
     new_fc, _ = create_linear(old_fc, in_channels)
     # Copy weights and bias (no pruning for final layer)
@@ -303,14 +299,11 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, w
     else:
         # When using provided mask, threshold is not used
         threshold = None
-        # Calculate units pruned from mask
         units_pruned = sum(
             mask_info["original_filters"] - mask_info["pruned_filters"] for mask_info in with_mask.values()
         )
 
     # Calculate original parameters for comparison
-    from comask.prune.utils import count_parameters
-
     total_params_before = count_parameters(model)
 
     # Prune features

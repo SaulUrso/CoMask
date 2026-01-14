@@ -31,7 +31,7 @@ def prune_pointwise_conv(
         # Use provided mask
         mask = layer_mask["mask"]
         out_idx = np.array(layer_mask["indices_kept"])
-        if len(out_idx.shape) == 0:  # Handle single index case
+        if len(out_idx.shape) == 0:
             out_idx = np.array([out_idx])
     else:
         # Calculate mask based on threshold
@@ -62,11 +62,10 @@ def prune_pointwise_conv(
 
     out_filters = len(out_idx)
 
-    # Create new layers
     new_conv2d = create_conv2d(old_conv2d, in_channels, out_filters)
     new_batchnorm2d = create_batchnorm2d(old_batchnorm2d, out_filters)
 
-    # Copy weights
+    # Copy conv weights
     new_conv2d.weight.data = old_conv2d.weight.data[out_idx.tolist(), :, :, :].clone()
     if old_conv2d.bias is not None:
         assert new_conv2d.bias is not None
@@ -86,13 +85,12 @@ def prune_pointwise_conv(
 
 def adapt_depthwise_conv(old_conv2d: nn.Conv2d, old_batchnorm2d, new_channels, in_idx):
     """Adapt depthwise convolution to match new channel count (no pruning, just adaptation)"""
-    # Assert that this is indeed a depthwise convolution
+
     assert old_conv2d.groups == old_conv2d.in_channels == old_conv2d.out_channels, (
         f"Expected depthwise conv with groups=in_channels=out_channels, "
         f"got groups={old_conv2d.groups}, in_channels={old_conv2d.in_channels}, out_channels={old_conv2d.out_channels}"
     )
 
-    # Assert weight shape is correct for depthwise conv
     expected_weight_shape = (old_conv2d.out_channels, 1, old_conv2d.kernel_size[0], old_conv2d.kernel_size[1])
     assert old_conv2d.weight.data.shape == expected_weight_shape, (
         f"Expected depthwise conv weight shape {expected_weight_shape}, got {old_conv2d.weight.data.shape}"
@@ -102,10 +100,8 @@ def adapt_depthwise_conv(old_conv2d: nn.Conv2d, old_batchnorm2d, new_channels, i
     new_conv2d = create_conv2d(old_conv2d, new_channels, new_channels, old_groups=new_channels)
     new_batchnorm2d = create_batchnorm2d(old_batchnorm2d, new_channels)
 
-    # Copy weights for kept channels only
     new_conv2d.weight.data = old_conv2d.weight.data[in_idx.tolist(), :, :, :].clone()
 
-    # Assert new weight shape is correct
     expected_new_weight_shape = (new_channels, 1, old_conv2d.kernel_size[0], old_conv2d.kernel_size[1])
     assert new_conv2d.weight.data.shape == expected_new_weight_shape, (
         f"Expected new depthwise conv weight shape {expected_new_weight_shape}, got {new_conv2d.weight.data.shape}"
@@ -169,7 +165,7 @@ def prune_depth_separable_conv2d(
     layer_mask=None,
 ):
     """Prune a DepthSeparableConv2d block - only prune the pointwise conv"""
-    # Assert that depthwise conv has correct structure
+
     depthwise_conv = old_block.depthwise[0]
     assert isinstance(depthwise_conv, nn.Conv2d), f"Expected Conv2d in depthwise, got {type(depthwise_conv)}"
     assert depthwise_conv.groups == depthwise_conv.in_channels == depthwise_conv.out_channels, (
@@ -177,7 +173,6 @@ def prune_depth_separable_conv2d(
         f"got groups={depthwise_conv.groups}, in_channels={depthwise_conv.in_channels}, out_channels={depthwise_conv.out_channels}"
     )
 
-    # Assert that pointwise conv is 1x1
     pointwise_conv = old_block.pointwise[0]
     assert isinstance(pointwise_conv, nn.Conv2d), f"Expected Conv2d in pointwise, got {type(pointwise_conv)}"
     assert pointwise_conv.kernel_size == (1, 1), f"Pointwise conv should be 1x1, got {pointwise_conv.kernel_size}"
@@ -186,8 +181,6 @@ def prune_depth_separable_conv2d(
     new_depthwise_conv, new_depthwise_bn = adapt_depthwise_conv(
         old_block.depthwise[0], old_block.depthwise[1], in_channels, in_idx
     )
-
-    # Assert adapted depthwise conv has correct properties
     assert (
         new_depthwise_conv.groups == new_depthwise_conv.in_channels == new_depthwise_conv.out_channels == in_channels
     ), (
@@ -208,7 +201,6 @@ def prune_depth_separable_conv2d(
         layer_mask=layer_mask,
     )
 
-    # Create new DepthSeparableConv2d block
     from comask.models.mobilenet import DepthSeperabelConv2d
 
     new_block = DepthSeperabelConv2d(
@@ -220,9 +212,7 @@ def prune_depth_separable_conv2d(
         bias=False,
     )
 
-    # Replace the internal layers
     new_block.depthwise = nn.Sequential(new_depthwise_conv, new_depthwise_bn, nn.ReLU(inplace=True))
-
     new_block.pointwise = nn.Sequential(new_pointwise_conv, new_pointwise_bn, nn.ReLU(inplace=True))
 
     return new_block, out_channels, out_idx, mask
@@ -232,7 +222,7 @@ def prune_features(model, conv_threshold, prune_way, minimum_channels=1, divisor
     """Prune MobileNet features"""
     masks = {}
 
-    # Start with input channels (grayscale)
+    # Start with input channels (only 1 in our case)
     in_channels = 1
     in_idx = None
 
@@ -279,7 +269,7 @@ def prune_features(model, conv_threshold, prune_way, minimum_channels=1, divisor
 
     model.stem = nn.Sequential(new_stem_0, new_stem_1)
 
-    # Prune conv1, conv2, conv3, conv4
+    # Prune conv1, conv2, conv3, conv4 of mobilenet
     for conv_block_name in ["conv1", "conv2", "conv3", "conv4"]:
         conv_block = getattr(model, conv_block_name)
         new_blocks = []
@@ -299,7 +289,6 @@ def prune_features(model, conv_threshold, prune_way, minimum_channels=1, divisor
             )
             new_blocks.append(new_block)
 
-            # Store mask
             masks[mask_key] = {
                 "mask": mask,
                 "layer_type": "conv",
@@ -317,7 +306,6 @@ def prune_classifier(model, in_channels, in_idx):
     """Adjust classifier for pruned features"""
     old_fc = model.fc
 
-    # Create new linear layer with adjusted input size
     new_fc, _ = create_linear(old_fc, in_channels)
 
     # Copy weights (only for kept channels)
@@ -341,7 +329,6 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, w
     else:
         # When using provided mask, threshold is not used
         threshold = None
-        # Calculate units pruned from mask
         units_pruned = sum(
             mask_info["original_filters"] - mask_info["pruned_filters"] 
             for mask_info in with_mask.values()

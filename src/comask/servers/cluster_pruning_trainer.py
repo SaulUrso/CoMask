@@ -15,6 +15,8 @@ from comask.prune.utils import jaccard_similarity, shuffle_mask
 
 from .cluster_trainer import ClusterAPI
 
+#NOTE: in the code we use mask proposal and mask-vote interchangeably
+
 
 class PruneClusterAPI(ClusterAPI):
     def __init__(self, args, device, dataset, model: nn.Module):
@@ -103,7 +105,7 @@ class PruneClusterAPI(ClusterAPI):
 
         self.group_dict = group_to_client_indexes
 
-        # Log cluster sizes to wandb config for easy retrieval
+        # Log cluster sizes to wandb
         if self.args.enable_wandb:
             cluster_sizes = {
                 f"cluster_{group_idx}_num_clients": len(client_idxs)
@@ -137,9 +139,9 @@ class PruneClusterAPI(ClusterAPI):
             # Initialize pruning counters for each cluster (starts at 3)
             prune_counter = getattr(self.args, "prune_counter", 3)
             self.cluster_prune_counters[group_idx] = prune_counter
-            # Initialize mask proposal dictionaries for each cluster
+            
             self.cluster_mask_proposals[group_idx] = {}
-            # Initialize first pruning units tracker
+
             self.cluster_first_prune_units[group_idx] = None
 
         self.client_weights = [copy.deepcopy(w_global)] * (self.args.client_num_in_total)
@@ -150,10 +152,6 @@ class PruneClusterAPI(ClusterAPI):
         for round_idx in range(self.args.comm_round):
             logging.info("################Communication round : {}".format(round_idx))
 
-            """
-            for scalability: following the original FedAvg algorithm, we uniformly sample a fraction of clients in each round.
-            Instead of changing the 'Client' instances, our implementation keeps the 'Client' instances and then updates their local dataset
-            """
             group_to_client_indexes = self._client_sampling(
                 round_idx, self.args.client_num_in_total, self.args.client_num_per_round
             )
@@ -162,9 +160,6 @@ class PruneClusterAPI(ClusterAPI):
             idx = 0
 
             for group_idx, client_indexes in group_to_client_indexes.items():
-                # Switch to the correct cluster model
-                # self.model = self.cluster_models[group_idx]
-                # self.model_trainer = create_model_trainer(self.model, self.args)
 
                 w_locals = []
                 w_curr_group = self.w_groups[group_idx]
@@ -172,9 +167,6 @@ class PruneClusterAPI(ClusterAPI):
                     client = self.client_list[idx]
 
                     client.model_trainer.model = self.cluster_models[group_idx]
-
-                    # Update client's model trainer to use cluster-specific model
-                    # client.model_trainer = create_model_trainer(copy.deepcopy(self.model), self.args)
 
                     client.update_local_dataset(
                         client_idx,
@@ -193,7 +185,7 @@ class PruneClusterAPI(ClusterAPI):
                                 logging.info(
                                     f"Client {client_idx} in cluster {group_idx} proposed a mask before training"
                                 )
-                                # Log proposal event to wandb table
+
                                 if self.proposal_table is not None:
                                     self.proposal_table.add_data(round_idx, group_idx, client_idx)
                                     logging.info(
@@ -213,7 +205,6 @@ class PruneClusterAPI(ClusterAPI):
                     w = client.train(copy.deepcopy(w_curr_group), args_override)
                     mlops.event("train", event_started=False, event_value="{}_{}".format(str(round_idx), str(idx)))
 
-                    # self.logging.info("local weights = " + str(w))
                     w_locals.append((client.get_sample_number(), copy.deepcopy(w)))
                     self.client_weights[client_idx] = copy.deepcopy(w)
 
@@ -222,7 +213,6 @@ class PruneClusterAPI(ClusterAPI):
                 # update group weights
                 mlops.event("agg", event_started=True, event_value=str(round_idx))
                 self.w_groups[group_idx] = self._aggregate(w_locals)
-                # Update cluster model with new weights
                 self.cluster_models[group_idx].load_state_dict(self.w_groups[group_idx])
 
                 mlops.event("agg", event_started=False, event_value=str(round_idx))
@@ -238,14 +228,15 @@ class PruneClusterAPI(ClusterAPI):
                 )
 
                 if self.args.pruning == "random" and round_idx % 50 == 0 and round_idx != 0:
+                    # don't consider this option for reproducing CoMask
                     self._prune_cluster_clients(group_idx, round_idx)
                 elif self.args.pruning == "proposal":
                     self._handle_mask_voting_and_pruning(group_idx, round_idx)
-            # at last round
+
+            # logging
             if round_idx == self.args.comm_round - 1:
                 self._local_test_on_all_clients(round_idx)
                 self._test_groups(round_idx)
-            # per {frequency_of_the_test} round
             elif round_idx % self.args.frequency_of_the_test == 0:
                 self._local_test_on_all_clients(round_idx)
                 self._test_groups(round_idx)
@@ -266,7 +257,6 @@ class PruneClusterAPI(ClusterAPI):
 
         cluster_seed = round_idx * (group_idx + 1)
 
-        # Read args once
         prune_way = getattr(self.args, "prune_way", "group_lasso")
         minimum_channels = getattr(self.args, "minimum_channels", 1)
         divisor = getattr(self.args, "divisor", 1)
@@ -335,11 +325,14 @@ class PruneClusterAPI(ClusterAPI):
 
     def _handle_mask_voting_and_pruning(self, group_idx: int, round_idx: int):
         """Handle mask voting and pruning for a cluster after aggregation."""
-        # Check if this cluster can still prune
+        
+        # NOTE: the current implementation could be relatively more efficient
+        # as we could just keep track of the sum of the masks, instead of storing all of them
+        # and then summing only once the voting percentage has been reached
+
         if self.cluster_prune_counters[group_idx] <= 0:
             return
 
-        # Check if we have enough proposals for consensus
         total_clients_in_cluster = len(self.group_dict[group_idx])
         current_proposals = len(self.cluster_mask_proposals[group_idx])
         required_proposals = max(int(total_clients_in_cluster * self.args.consensus_percentage), 1)
@@ -349,9 +342,9 @@ class PruneClusterAPI(ClusterAPI):
                 f"Cluster {group_idx} reached consensus ({current_proposals}/{total_clients_in_cluster} proposals, needed {required_proposals})"
             )
             self._apply_voted_mask(group_idx, round_idx)
-            # Decrement the pruning counter
+
+            # prepare for next consolidation
             self.cluster_prune_counters[group_idx] -= 1
-            # Clear proposals for this cluster
             self.cluster_mask_proposals[group_idx] = {}
             logging.info(f"Cluster {group_idx} has {self.cluster_prune_counters[group_idx]} prune attempts remaining")
 
@@ -364,7 +357,6 @@ class PruneClusterAPI(ClusterAPI):
 
         # Build a temporary trainer for evaluation using the cluster model structure
         self.model_trainer.model = self.cluster_models[group_idx]
-        # self.model_trainer.set_model_params(self.client_weights[client_idx])
         self.model_trainer.set_model_params(self.w_groups[group_idx])
 
         val_metrics = self.model_trainer.test(val_loader, self.device, self.args)
@@ -379,12 +371,10 @@ class PruneClusterAPI(ClusterAPI):
             )
             return None
 
-        # Use the cluster's current model for proposal generation (copy to CPU for pruning)
+        # Use the cluster's current model for mask-vote generation (copy to CPU for pruning)
         temp_model = copy.deepcopy(self.cluster_models[group_idx]).cpu()
-        # temp_model.load_state_dict(self.client_weights[client_idx])
         temp_model.load_state_dict(self.w_groups[group_idx])
 
-        # Read args once for pruning
         prune_way = getattr(self.args, "prune_way", "group_lasso")
         minimum_channels = getattr(self.args, "minimum_channels", 1)
         divisor = getattr(self.args, "divisor", 1)
@@ -395,7 +385,7 @@ class PruneClusterAPI(ClusterAPI):
         else:
             prune_param = self.cluster_first_prune_units[group_idx]
 
-        # Generate mask proposal
+        # Generate mask-vote
         _, _, _, _, mask_proposal, _ = prune_model(
             temp_model,
             percent=prune_param,
@@ -447,6 +437,7 @@ class PruneClusterAPI(ClusterAPI):
                 )
 
         if test_jaccard and len(mask_proposals) >= 10:  # Need at least 10 proposals for 20% groups
+            #NOTE: ignore this branch for normal behavior
             logging.info(f"Testing Jaccard similarity for cluster {group_idx} with {len(mask_proposals)} proposals")
 
             # Split proposals into first 20% (old) and last 20% (new)
@@ -577,7 +568,6 @@ class PruneClusterAPI(ClusterAPI):
         self.w_groups[group_idx] = pruned_cluster_model.state_dict()
         logging.info(f"Applied voted mask to cluster {group_idx} at round {round_idx}")
 
-        # Apply same voted mask to each client's individual model in the cluster
         for client_idx in self.group_dict[group_idx]:
             client_model = copy.deepcopy(self.cluster_models[group_idx]).cpu()
             client_model.load_state_dict(self.client_weights[client_idx])
@@ -612,9 +602,6 @@ class PruneClusterAPI(ClusterAPI):
             self.train_data_local_num_dict[client_idx],
             local_val_data=self.val_data_local_dict[client_idx],
         )
-
-        # Update client's model trainer to use cluster-specific model structure
-        # client.model_trainer = create_model_trainer(copy.deepcopy(self.model), self.args)
 
         # Personal model evaluation
         self.model_trainer.set_model_params(self.client_weights[client_idx])

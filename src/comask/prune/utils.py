@@ -13,7 +13,7 @@ def ssl_loss(model: nn.Module, model_type="resnet", loss_type=KEY_FILTER, lambda
     ssl_loss = 0
 
     if loss_type in [KEY_FILTER, KEY_CHANNEL, KEY_FILTER_AND_CHANNEL]:
-        # Get prunable layers (excluding final classification layer)
+        # Get prunable layers
         conv_layers, linear_layers = _get_prunable_layers(model)
 
         # Process Conv2d layers
@@ -21,29 +21,21 @@ def ssl_loss(model: nn.Module, model_type="resnet", loss_type=KEY_FILTER, lambda
             param = module.weight
 
             if loss_type == KEY_FILTER:
-                # Group LASSO over filters of current layer
                 ssl_loss += lambda_n * torch.sum(group_lasso_by_filter_or_channel(param, (1, 2, 3)))
             elif loss_type == KEY_CHANNEL:
-                # Group LASSO over channel of current layer
                 ssl_loss += lambda_c * torch.sum(group_lasso_by_filter_or_channel(param, (0, 2, 3)))
             elif loss_type == KEY_FILTER_AND_CHANNEL:
-                # Group LASSO over filters of current layer
                 ssl_loss += lambda_n * torch.sum(group_lasso_by_filter_or_channel(param, (1, 2, 3)))
-                # Group LASSO over channel of current layer
                 ssl_loss += lambda_c * torch.sum(group_lasso_by_filter_or_channel(param, (0, 2, 3)))
 
         # Process Linear layers (excluding final layer)
         for name, module in linear_layers:
             param = module.weight
-
             if loss_type == KEY_FILTER:
-                # Treat as filter-wise for linear layers
                 ssl_loss += lambda_n * torch.sum(group_lasso_by_filter_or_channel(param, (1,)))
             elif loss_type == KEY_CHANNEL:
-                # Treat as channel-wise for linear layers
                 ssl_loss += lambda_c * torch.sum(group_lasso_by_filter_or_channel(param, (0,)))
             elif loss_type == KEY_FILTER_AND_CHANNEL:
-                # Both filter and channel for linear layers
                 ssl_loss += lambda_n * torch.sum(group_lasso_by_filter_or_channel(param, (1,)))
                 ssl_loss += lambda_c * torch.sum(group_lasso_by_filter_or_channel(param, (0,)))
 
@@ -79,14 +71,14 @@ def computer_total(model, dim):
     assert isinstance(model, nn.Module)
     total = 0
 
-    # Get prunable layers (excluding final classification layer)
+    # Get prunable layers
     conv_layers, linear_layers = _get_prunable_layers(model)
 
     # Count the specified dimension lengths of all Conv layers
     for name, m in conv_layers:
         total += m.weight.data.shape[dim]
 
-    # Count linear layers (excluding final layer)
+    # Count linear layers
     first_linear = True
     for name, m in linear_layers:
         # if doing channel wise, the first linear layer has to be considered
@@ -94,7 +86,9 @@ def computer_total(model, dim):
         if dim == 1 and first_linear:
             first_linear = False
             n_cols = m.weight.data.shape[dim]
-            n_ch = n_cols / (5 * 5)  # TODO: change if filter dimension changes
+            n_ch = n_cols / (5 * 5)  
+            # TODO: change if filter dimension changes
+            # (this is only valid for lenet5, not shown in the paper)
             assert n_ch == int(n_ch)
             total += int(n_ch)
         else:
@@ -208,8 +202,6 @@ def computer_conv_with_params(model, conv, param_counts, index, dim, dimension, 
     - Channel pruning: removes channel params + corresponding output channels in previous layer
     """
 
-    # TODO: when getting the next of a linear,
-    # Get prunable layers (excluding final classification layer)
     conv_layers, linear_layers = _get_prunable_layers(model)
     all_layers = conv_layers + linear_layers
 
@@ -220,7 +212,7 @@ def computer_conv_with_params(model, conv, param_counts, index, dim, dimension, 
 
         next_name, next_layer = all_layers[layer_idx + 1]
 
-        if dim == 0:  # filter pruning - affects input channels of next layer
+        if dim == 0:  # filter pruning (affects input channels of next layer)
             if isinstance(next_layer, nn.Conv2d):
                 # Each filter removed eliminates: 1 * kernel_h * kernel_w params per output filter
                 return (
@@ -229,7 +221,7 @@ def computer_conv_with_params(model, conv, param_counts, index, dim, dimension, 
             elif isinstance(next_layer, nn.Linear):
                 # Each filter removed eliminates params proportional to the spatial dimensions
                 # For the first linear layer after conv, this depends on the spatial size
-                return next_layer.weight.data.shape[0]  # * 25 - 5*5 spatial size assumption
+                return next_layer.weight.data.shape[0] 
         else:  # channel pruning - affects output channels of previous layer
             # This is more complex and typically handled differently in practice
             # For now, we'll use the same logic as filter pruning
@@ -244,7 +236,6 @@ def computer_conv_with_params(model, conv, param_counts, index, dim, dimension, 
 
     # Process Conv2d layers
     for layer_idx, (name, m) in enumerate(conv_layers):
-        # print(name)
         size = m.weight.data.shape[dim]
         conv[index : (index + size)] = computer_weight(m.weight, prune_way, dimension)
 
@@ -490,14 +481,9 @@ def combine_mask(mask_1, mask_2):
 
         # Get the original mask from first pruning (relative to original model)
         original_mask_1 = mask_1_info["mask"]  # Boolean tensor indicating kept filters
-
-        # Get the mask from second pruning (relative to already pruned model)
         mask_2_tensor = mask_2_info["mask"]
 
-        # Get indices that were kept in first pruning
         kept_indices_1 = torch.where(original_mask_1 > 0)[0]
-
-        # Get indices that were kept in second pruning (relative to pruned model)
         kept_indices_2 = torch.where(mask_2_tensor > 0)[0]
 
         # Map the second pruning indices back to original model indices
@@ -509,7 +495,6 @@ def combine_mask(mask_1, mask_2):
         combined_mask_tensor = torch.zeros_like(original_mask_1)
         combined_mask_tensor[final_kept_indices] = 1.0
 
-        # Create combined mask info
         combined_masks[layer_name] = {
             "mask": combined_mask_tensor,
             "layer_type": mask_1_info["layer_type"],
@@ -566,13 +551,13 @@ def shuffle_mask(names_mask, seed):
         >>> # shuffled["conv1"]["mask"] might be: torch.tensor([0., 1., 0., 1., 1.])
         >>> # shuffled["conv1"]["indices_kept"] might be: np.array([1, 3, 4])
     """
-    # Create random number generator with seed
+
     rng = np.random.default_rng(seed)
 
     shuffled_masks = {}
 
     for layer_name, mask_info in names_mask.items():
-        # Get the original mask
+
         original_mask = mask_info["mask"].cpu()
 
         # Get total number of positions and number of ones
@@ -590,7 +575,6 @@ def shuffle_mask(names_mask, seed):
         # Set the selected positions to 1
         new_mask[torch.from_numpy(shuffled_positions)] = 1.0
 
-        # Create new mask info with updated fields
         shuffled_masks[layer_name] = {
             "mask": new_mask,
             "layer_type": mask_info["layer_type"],
@@ -599,7 +583,6 @@ def shuffle_mask(names_mask, seed):
             "indices_kept": shuffled_positions,
         }
 
-        # Verify that the number of kept filters is the same
         assert num_ones == mask_info["pruned_filters"] == len(shuffled_positions) == int(torch.sum(new_mask).item()), (
             f"Mismatch in pruned_filters for layer {layer_name}: "
             f"expected {mask_info['pruned_filters']}, got {len(shuffled_positions)}"
@@ -645,16 +628,13 @@ def jaccard_similarity(mask1, mask2):
         return {"per_layer": {}, "overall": 0.0, "mean": 0.0}
 
     for layer_name in common_layers:
-        # Extract mask tensors and ensure they're on CPU for computation
         m1 = mask1[layer_name]["mask"].cpu()
         m2 = mask2[layer_name]["mask"].cpu()
 
-        # Ensure masks have the same shape
         assert m1.shape == m2.shape, f"Mask shape mismatch for layer {layer_name}: {m1.shape} vs {m2.shape}"
-
-        # Assert masks are in binary format
         assert torch.all((m1 == 0) | (m1 == 1)), f"mask1 for layer {layer_name} must be binary (0 or 1)"
         assert torch.all((m2 == 0) | (m2 == 1)), f"mask2 for layer {layer_name} must be binary (0 or 1)"
+        
         m1_binary = m1
         m2_binary = m2
 

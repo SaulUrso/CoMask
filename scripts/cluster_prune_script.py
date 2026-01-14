@@ -124,7 +124,7 @@ if __name__ == "__main__":
     else:
         model = fedml.model.create(args, output_dim)
 
-    # # this should work, in reality all arguments but last are ignored
+    # in reality all arguments but last are ignored
     fedml_runner = FedMLRunner(
         args,
         device,

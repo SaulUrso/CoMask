@@ -1,10 +1,8 @@
-# -*- coding: utf-8 -*-
-
 """
 @date: 2021/6/11 上午10:43
 @file: profile.py
 @author: zj
-@description: 
+@description: taken from https://github.com/ZJCV/SSL
 """
 
 import time

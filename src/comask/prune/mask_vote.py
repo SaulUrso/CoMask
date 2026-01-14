@@ -27,7 +27,6 @@ def vote_mask(masks_list: List[Dict[str, Any]], percentage_or_units, min_filters
     if not masks_list:
         raise ValueError("masks_list cannot be empty")
 
-    # Validate input based on type
     if isinstance(percentage_or_units, int):
         if percentage_or_units < 0:
             raise ValueError("units_to_remove must be non-negative")
@@ -51,10 +50,11 @@ def vote_mask(masks_list: List[Dict[str, Any]], percentage_or_units, min_filters
 
     # Calculate votes for each unit in each layer
     for layer_name in sorted(list(all_layer_names)):
-        # Find the original size by looking at the first mask that has this layer
+        
         original_size = None
         layer_type = None
 
+        # Find the original size by looking at the first mask that has this layer
         for mask_dict in masks_list:
             if layer_name in mask_dict:
                 original_size = mask_dict[layer_name]["original_filters"]
@@ -63,21 +63,19 @@ def vote_mask(masks_list: List[Dict[str, Any]], percentage_or_units, min_filters
 
         assert original_size is not None
 
-        # Initialize vote count for this layer
+        # Initialize vote count
         votes = torch.zeros(original_size, dtype=torch.float32)
 
         # Count votes from each mask
         for mask_dict in masks_list:
             assert layer_name in mask_dict
             mask_tensor = mask_dict[layer_name]["mask"]
-            # Ensure the mask has the correct size (should match original_size)
             assert len(mask_tensor) == original_size
             votes += mask_tensor
 
         layer_votes[layer_name] = votes
         layer_info[layer_name] = {"original_size": original_size, "layer_type": layer_type}
 
-    # Collect all votes across all layers for global ranking
     all_votes = []
     vote_locations = []  # (layer_name, unit_index) for each vote
 
@@ -93,11 +91,11 @@ def vote_mask(masks_list: List[Dict[str, Any]], percentage_or_units, min_filters
     # Calculate how many units to remove globally
     total_units = len(all_votes)
     if isinstance(percentage_or_units, int):
-        # Absolute number of units to remove
+        # Absolute number of units to remove was given
         assert percentage_or_units < total_units - min_filters * len(all_layer_names)
         units_to_remove = percentage_or_units
     else:
-        # Percentage of units to remove
+        # Percentage of units to remove if not an integer
         units_to_remove = int(total_units * percentage_or_units) + 1
 
     # needed to see how many units we are removing, to not remove all of them
@@ -110,7 +108,6 @@ def vote_mask(masks_list: List[Dict[str, Any]], percentage_or_units, min_filters
         original_idx = int(sorted_indices[candidate_idx].item())
         layer_name, unit_idx = vote_locations[original_idx]
 
-        # Check if removing this unit would violate min_filters constraint
         original_size = layer_info[layer_name]["original_size"]
         current_removals = layer_removal_counts[layer_name]
 
@@ -122,14 +119,13 @@ def vote_mask(masks_list: List[Dict[str, Any]], percentage_or_units, min_filters
 
         candidate_idx += 1
 
-    # Create consolidated masks
     consolidated_masks = {}
 
+    # Create consolidated mask
     for layer_name in all_layer_names:
         original_size = layer_info[layer_name]["original_size"]
         layer_type = layer_info[layer_name]["layer_type"]
-
-        # Create consolidated mask for this layer
+        
         consolidated_mask = torch.ones(original_size, dtype=torch.float32)
 
         # Remove units that were selected for removal

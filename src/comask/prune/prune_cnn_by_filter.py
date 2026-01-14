@@ -14,8 +14,6 @@ from .utils import (
     set_module_list,
 )
 
-# TODO: the conv assumes to have a bias, but you may want to remove it i guess (or not, since you already did the experiments)
-
 
 def prune_conv(
     old_conv2d: nn.Conv2d,
@@ -42,7 +40,7 @@ def prune_conv(
         ):  # NOTE: present in original code, specifies min number of filter in a layer
             # just specify the indices of the filters maintained, which is the same as no pruning hapened
             out_idx = np.arange(minimum_channels)
-            mask = torch.ones(len(weight_copy))
+            mask = torch.ones(len(weight_copy))  # type: ignore
 
         else:
             mask = weight_copy.gt(conv_threshold).float()
@@ -67,8 +65,8 @@ def prune_conv(
 
                 out_idx = np.array(sorted(np.concatenate((out_idx, res_idx))))
                 # Update mask to reflect the additional kept filters
-                mask = torch.zeros(len(weight_copy))
-                mask[out_idx] = 1.0 # type: ignore
+                mask = torch.zeros(len(weight_copy))  # type: ignore
+                mask[out_idx] = 1.0  # type: ignore
 
     # Number of output channel
     out_filters = len(out_idx)
@@ -97,9 +95,9 @@ def prune_conv(
 
 def prune_features(module_list, conv_threshold, prune_way, minimum_channels=1, divisor=1, with_mask=None):
     new_module_list = list()
-    masks = {}  # Changed from list to dict
+    masks = {}  
     idx = 0
-    layer_idx = 0  # Track layer index for naming
+    layer_idx = 0  
 
     # NOTE: for HARBox_CNN, input channels is 1
     in_channels = 1
@@ -107,7 +105,6 @@ def prune_features(module_list, conv_threshold, prune_way, minimum_channels=1, d
 
     while idx < len(module_list):
         if isinstance(module_list[idx], nn.Sequential):
-            # Handle sequential blocks containing Conv2d + BatchNorm2d
             seq_block = module_list[idx]
             conv_layer = seq_block[0]  # Conv2d
             bn_layer = seq_block[1]  # BatchNorm2d
@@ -115,12 +112,10 @@ def prune_features(module_list, conv_threshold, prune_way, minimum_channels=1, d
             assert isinstance(conv_layer, nn.Conv2d), f"Expected Conv2d, got {type(conv_layer)}"
             assert isinstance(bn_layer, nn.BatchNorm2d), f"Expected BatchNorm2d, got {type(bn_layer)}"
 
-            # Get layer mask if provided
             layer_name = f"conv_{layer_idx}"
             layer_mask = None
             if with_mask is not None:
-                # print(conv_layer)
-                # Find the corresponding mask by looking through all mask keys
+                # Find the corresponding mask
                 for mask_key, mask_data in with_mask.items():
                     if mask_key == layer_name:
                         layer_mask = mask_data
@@ -140,7 +135,6 @@ def prune_features(module_list, conv_threshold, prune_way, minimum_channels=1, d
                 layer_mask=layer_mask,
             )
 
-            # Store mask information with layer name
             masks[layer_name] = {
                 "mask": mask,
                 "layer_type": "conv",
@@ -150,17 +144,16 @@ def prune_features(module_list, conv_threshold, prune_way, minimum_channels=1, d
             }
             layer_idx += 1
 
-            # Create new sequential block
             new_seq_block = nn.Sequential(new_conv2d, new_batchnorm2d)
             new_module_list.append(new_seq_block)
-            # NOTE: hte way i iterate, in the list i get a reference to the sequential,
-            # and then a reference to each of its submodules, that is why i need to replicate them
+            # NOTE: the way we iterate, in the list we get a reference to the sequential block,
+            # and then a reference to each of its submodules, that is why we need to replicate them
             new_module_list.append(new_conv2d)
             new_module_list.append(new_batchnorm2d)
             idx += 3
 
         elif isinstance(module_list[idx], nn.Conv2d):
-            # Handle standalone Conv2d layers (if any)
+            # Should never happen
             raise Exception(f"found module {module_list[idx]} as conv alone, but there should not be any")
 
         elif isinstance(module_list[idx], nn.MaxPool2d):
@@ -203,9 +196,6 @@ def prune_linear(old_linear: nn.Linear, threshold, prune_way, in_cols, in_idx, m
 
             out_idx = np.array(sorted(np.concatenate((out_idx, res_idx))))
 
-        # print(out_idx)
-        # print(new_prune_len)
-
     # Number of output channel
     out_cols = len(out_idx)
 
@@ -224,9 +214,9 @@ def prune_classifier(module_list, in_channels, in_idx):
 
     # For HARBox_CNN: last conv layer has 32 channels and output size is 8x8
     # So flattened size is 32 * 8 * 8 = 2048
-    in_idx_fc = torch.arange(32 * 8 * 8).reshape(32, 8, 8)[in_idx, :, :].reshape(-1)
+    in_idx_fc = torch.arange(32 * 8 * 8).reshape(32, 8, 8)[in_idx, :, :].reshape(-1)  # type: ignore
 
-    # For HARBox_CNN, there's only one linear layer (no hidden layers to prune)
+    # For HARBox_CNN, there's only one linear layer (no fc hidden layers to prune)
     # So we just create the final layer with pruned inputs
     old_linear = module_list[0]
     new_linear, _ = create_linear(old_linear, in_channels)
@@ -238,18 +228,18 @@ def prune_classifier(module_list, in_channels, in_idx):
 
 
 def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, with_mask=None):
-    # Calculate threshold (only if not using provided mask)
     total_groups = None
     units_pruned = 0
-    if with_mask is None:
-        total_groups, threshold, planned_units_pruned = computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way=prune_way)
+    if with_mask is None:  # Calculate threshold (only if not using provided mask)
+        total_groups, threshold, planned_units_pruned = computer_conv_threshold(
+            model, percent, prune_type=KEY_FILTER, prune_way=prune_way
+        )
         units_pruned = planned_units_pruned
     else:
         threshold = None
         # Calculate units pruned from mask
         units_pruned = sum(
-            mask_info["original_filters"] - mask_info["pruned_filters"] 
-            for mask_info in with_mask.values()
+            mask_info["original_filters"] - mask_info["pruned_filters"] for mask_info in with_mask.values()
         )
 
     total_params_before = count_parameters(model)
@@ -260,15 +250,16 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, w
     classifier_module_list = list()
 
     for name, module in model.named_modules():
-        if "linear" in name:  # Linear layer -> classifier
+        if "linear" in name:
             classifier_name_list.append(f"{name}")
             classifier_module_list.append(module)
-        elif "conv" in name:  # Convolutional blocks -> features
+        elif "conv" in name:
             feature_name_list.append(f"{name}")
             feature_module_list.append(module)
         elif name == "":
             continue
 
+    # this pruned all the convolutional layers
     new_module_list, in_channels, in_idx, masks = prune_features(
         feature_module_list,
         conv_threshold=threshold,
@@ -277,15 +268,6 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, w
         divisor=divisor,
         with_mask=with_mask,
     )
-
-    # # Associate actual layer names with masks
-    # named_masks = {}
-    # conv_layer_count = 0
-    # for name in feature_name_list:
-    #     if "conv" in name and name.endswith(".0"):  # Only for actual conv layers (not sequential or batchnorm)
-    #         mask_key = f"conv_{conv_layer_count}"
-    #         named_masks[name] = masks[mask_key]
-    #         conv_layer_count += 1
 
     assert len(new_module_list) == len(feature_module_list) == len(feature_name_list)
     set_module_list(model, feature_name_list, feature_module_list, new_module_list)
@@ -305,15 +287,11 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, w
         new_total_groups, _, _ = computer_conv_threshold(model, percent, prune_type=KEY_FILTER, prune_way=prune_way)
         group_pruning_ratio = (total_groups - new_total_groups) / total_groups if total_groups is not None else None
     else:
-        # Recalculate actual units pruned from resulting masks
-        units_pruned = sum(
-            mask_info["original_filters"] - mask_info["pruned_filters"] 
-            for mask_info in masks.values()
-        )
+        units_pruned = sum(mask_info["original_filters"] - mask_info["pruned_filters"] for mask_info in masks.values())
 
     total_params_after = count_parameters(model)
 
-    # Calculate parameter-based pruning ratio
+    # Calculate parameter-based pruning ratio (not necessary but done for debugging)
     param_pruning_ratio = (total_params_before - total_params_after) / total_params_before
 
     return model, param_pruning_ratio, group_pruning_ratio, threshold, masks, units_pruned
