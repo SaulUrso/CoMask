@@ -315,14 +315,14 @@ def computer_conv_threshold(model, percent_or_groups, prune_type=KEY_FILTER, pru
     """
     Calculate pruning threshold of Conv layer based on parameter percentage removal or absolute number of groups.
     Excludes the final classification layer from pruning calculations.
-    
+
     Args:
         model: The model to analyze
         percent_or_groups: Either percentage (float 0-1) or absolute number of groups to prune (int)
         prune_type: Type of pruning (KEY_FILTER, KEY_CHANNEL, or KEY_FILTER_AND_CHANNEL)
         prune_way: Method for computing importance scores
         ceil: Whether to round up when computing threshold
-        
+
     Returns:
         tuple: (total_groups, threshold, groups_to_prune)
     """
@@ -356,7 +356,7 @@ def computer_conv_threshold(model, percent_or_groups, prune_type=KEY_FILTER, pru
         raise ValueError(f"{prune_type} does not supports")
 
     y, i = torch.sort(conv)
-    
+
     # Determine if input is percentage or absolute number
     if isinstance(percent_or_groups, int):
         # Absolute number of groups to prune
@@ -368,8 +368,8 @@ def computer_conv_threshold(model, percent_or_groups, prune_type=KEY_FILTER, pru
         percent = percent_or_groups
         groups_to_prune = int(total_groups * percent) + 1
         thre_index = groups_to_prune - 1
-    
-    thre = y[thre_index +  (1 if ceil else 0)]
+
+    thre = y[thre_index + (1 if ceil else 0)]
 
     # print(f"Total groups: {total_groups}")
     # if isinstance(percent_or_groups, int):
@@ -606,3 +606,82 @@ def shuffle_mask(names_mask, seed):
         )
 
     return shuffled_masks
+
+
+def jaccard_similarity(mask1, mask2):
+    """
+    Compute Jaccard similarity (Intersection over Union) between two pruning masks.
+
+    This function is completely generic and works with masks from any model architecture.
+    It compares the binary mask tensors layer-by-layer and computes both per-layer and
+    overall Jaccard similarity scores.
+
+    Args:
+        mask1 (dict): First mask dictionary with structure:
+                     {layer_name: {"mask": torch.Tensor, ...}, ...}
+        mask2 (dict): Second mask dictionary with same structure
+
+    Returns:
+        dict: Dictionary containing:
+            - "per_layer": dict mapping layer_name to Jaccard similarity score
+            - "overall": float, overall Jaccard similarity (weighted by layer size)
+            - "mean": float, unweighted mean of per-layer similarities
+
+    Example:
+        >>> mask1 = {"conv1": {"mask": torch.tensor([1., 0., 1., 0.])}}
+        >>> mask2 = {"conv1": {"mask": torch.tensor([1., 1., 0., 0.])}}
+        >>> similarity = jaccard_similarity(mask1, mask2)
+        >>> print(similarity["per_layer"]["conv1"])  # 0.333... (1 intersection, 3 union)
+        >>> print(similarity["overall"])  # 0.333...
+    """
+    per_layer_similarities = {}
+    total_intersection = 0
+    total_union = 0
+
+    # Get common layers between both masks
+    common_layers = set(mask1.keys()) & set(mask2.keys())
+
+    if not common_layers:
+        return {"per_layer": {}, "overall": 0.0, "mean": 0.0}
+
+    for layer_name in common_layers:
+        # Extract mask tensors and ensure they're on CPU for computation
+        m1 = mask1[layer_name]["mask"].cpu()
+        m2 = mask2[layer_name]["mask"].cpu()
+
+        # Ensure masks have the same shape
+        assert m1.shape == m2.shape, f"Mask shape mismatch for layer {layer_name}: {m1.shape} vs {m2.shape}"
+
+        # Assert masks are in binary format
+        assert torch.all((m1 == 0) | (m1 == 1)), f"mask1 for layer {layer_name} must be binary (0 or 1)"
+        assert torch.all((m2 == 0) | (m2 == 1)), f"mask2 for layer {layer_name} must be binary (0 or 1)"
+        m1_binary = m1
+        m2_binary = m2
+
+        # Compute intersection and union
+        intersection = torch.sum(m1_binary * m2_binary).item()
+        union = torch.sum(torch.clamp(m1_binary + m2_binary, 0, 1)).item()
+
+        # Compute Jaccard similarity for this layer
+        if union > 0:
+            layer_jaccard = intersection / union
+        else:
+            # Both masks are all zeros - consider this as perfect similarity
+            layer_jaccard = 1.0
+
+        per_layer_similarities[layer_name] = layer_jaccard
+
+        # Accumulate for overall similarity
+        total_intersection += intersection
+        total_union += union
+
+    # Compute overall Jaccard similarity (weighted by layer sizes)
+    if total_union > 0:
+        overall_similarity = total_intersection / total_union
+    else:
+        overall_similarity = 1.0
+
+    # Compute unweighted mean of per-layer similarities
+    mean_similarity = sum(per_layer_similarities.values()) / len(per_layer_similarities)
+
+    return {"per_layer": per_layer_similarities, "overall": overall_similarity, "mean": mean_similarity}

@@ -11,7 +11,7 @@ import wandb
 from tesifedml.clients.prune_client import ModelTrainerSSL, PruneClient
 from tesifedml.prune.mask_vote import vote_mask
 from tesifedml.prune.unified_prune import prune_model
-from tesifedml.prune.utils import shuffle_mask
+from tesifedml.prune.utils import jaccard_similarity, shuffle_mask
 
 from .cluster_trainer import ClusterAPI
 
@@ -418,28 +418,163 @@ class PruneClusterAPI(ClusterAPI):
             consolidation_param = self.args.consolidation_percentage
             logging.info(f"Using {consolidation_param} percentage for mask voting in cluster {group_idx}")
 
-        voted_mask = vote_mask(mask_proposals, consolidation_param)
-        logging.info(f"Consolidated {len(mask_proposals)} mask proposals for cluster {group_idx}")
-
         prune_percent = self.args.prune_percent
         prune_way = getattr(self.args, "prune_way", "group_lasso")
         minimum_channels = getattr(self.args, "minimum_channels", 1)
         divisor = getattr(self.args, "divisor", 1)
 
-        # Apply voted mask to cluster's model
-        cluster_model = copy.deepcopy(self.cluster_models[group_idx]).cpu()
-        cluster_model.load_state_dict(self.w_groups[group_idx])
+        # Check if test_jaccard is enabled and we have enough proposals
+        test_jaccard = getattr(self.args, "test_jaccard", False)
 
-        pruned_cluster_model, _, _, _, _, units_pruned = prune_model(
-            cluster_model,
-            prune_percent,
-            prune_way,
-            minimum_channels,
-            divisor,
-            with_mask=voted_mask,
-        )
+        # Validate consolidation_param for vote_mask
+        # If using absolute units, check if it's feasible; otherwise fall back to percentage
+        voting_param = consolidation_param
+        if isinstance(consolidation_param, int) and len(mask_proposals) > 0:
+            # Calculate total units available in the masks
+            sample_mask = mask_proposals[0]
+            total_units = sum(mask_info["original_filters"] for mask_info in sample_mask.values())
+            num_layers = len(sample_mask)
+            min_filters = 1
+
+            # Check if absolute number is feasible
+            max_removable = total_units - (min_filters * num_layers)
+            if consolidation_param >= max_removable:
+                # Fall back to percentage
+                voting_param = self.args.consolidation_percentage
+                logging.warning(
+                    f"consolidation_param={consolidation_param} is too large (max_removable={max_removable}). "
+                    f"Falling back to percentage={voting_param}"
+                )
+
+        if test_jaccard and len(mask_proposals) >= 10:  # Need at least 10 proposals for 20% groups
+            logging.info(f"Testing Jaccard similarity for cluster {group_idx} with {len(mask_proposals)} proposals")
+
+            # Split proposals into first 20% (old) and last 20% (new)
+            num_proposals = len(mask_proposals)
+            old_count = max(1, int(num_proposals * 0.2))
+            new_count = max(1, int(num_proposals * 0.2))
+
+            old_proposals = mask_proposals[:old_count]
+            new_proposals = mask_proposals[-new_count:]
+
+            logging.info(f"Old proposals: {len(old_proposals)}, New proposals: {len(new_proposals)}")
+
+            # Compute masks for both groups
+            old_voted_mask = vote_mask(old_proposals, voting_param)
+            new_voted_mask = vote_mask(new_proposals, voting_param)
+
+            # Measure Jaccard similarity between the two masks
+            jaccard_results = jaccard_similarity(old_voted_mask, new_voted_mask)
+            logging.info(
+                f"Jaccard similarity - Overall: {jaccard_results['overall']:.4f}, Mean: {jaccard_results['mean']:.4f}"
+            )
+
+            # Log Jaccard similarity to wandb
+            if self.args.enable_wandb:
+                wandb.log(
+                    {
+                        f"Cluster_{group_idx}/Jaccard/Overall": jaccard_results["overall"],
+                        f"Cluster_{group_idx}/Jaccard/Mean": jaccard_results["mean"],
+                        "round": round_idx,
+                    }
+                )
+
+            # Test accuracy of both masks on the test set
+            # Test old mask
+            cluster_model_old = copy.deepcopy(self.cluster_models[group_idx]).cpu()
+            cluster_model_old.load_state_dict(self.w_groups[group_idx])
+            pruned_old_model, _, _, _, _, _ = prune_model(
+                cluster_model_old,
+                prune_percent,
+                prune_way,
+                minimum_channels,
+                divisor,
+                with_mask=old_voted_mask,
+            )
+
+            # Set up temporary trainer for old mask
+            self.model_trainer.model = pruned_old_model.to(self.device)
+            self.model_trainer.set_model_params(pruned_old_model.state_dict())
+            old_test_metrics = self.model_trainer.test(self.test_global, self.device, self.args)
+            old_test_acc = old_test_metrics["test_correct"] / old_test_metrics["test_total"]
+            old_test_loss = old_test_metrics["test_loss"] / old_test_metrics["test_total"]
+
+            logging.info(f"Old mask test accuracy: {old_test_acc:.4f}, loss: {old_test_loss:.4f}")
+
+            # Test new mask
+            cluster_model_new = copy.deepcopy(self.cluster_models[group_idx]).cpu()
+            cluster_model_new.load_state_dict(self.w_groups[group_idx])
+            pruned_new_model, _, _, _, _, _ = prune_model(
+                cluster_model_new,
+                prune_percent,
+                prune_way,
+                minimum_channels,
+                divisor,
+                with_mask=new_voted_mask,
+            )
+
+            # Set up temporary trainer for new mask
+            self.model_trainer.model = pruned_new_model.to(self.device)
+            self.model_trainer.set_model_params(pruned_new_model.state_dict())
+            new_test_metrics = self.model_trainer.test(self.test_global, self.device, self.args)
+            new_test_acc = new_test_metrics["test_correct"] / new_test_metrics["test_total"]
+            new_test_loss = new_test_metrics["test_loss"] / new_test_metrics["test_total"]
+
+            logging.info(f"New mask test accuracy: {new_test_acc:.4f}, loss: {new_test_loss:.4f}")
+
+            # Log both accuracies to wandb
+            if self.args.enable_wandb:
+                wandb.log(
+                    {
+                        f"Cluster_{group_idx}/MaskComparison/OldMask/Acc": old_test_acc,
+                        f"Cluster_{group_idx}/MaskComparison/OldMask/Loss": old_test_loss,
+                        f"Cluster_{group_idx}/MaskComparison/NewMask/Acc": new_test_acc,
+                        f"Cluster_{group_idx}/MaskComparison/NewMask/Loss": new_test_loss,
+                        "round": round_idx,
+                    }
+                )
+
+            # Adopt the mask with higher accuracy
+            if old_test_acc >= new_test_acc:
+                voted_mask = old_voted_mask
+                pruned_cluster_model = pruned_old_model
+                chosen_mask = "old"
+                logging.info(f"Adopted OLD mask with accuracy {old_test_acc:.4f} (new: {new_test_acc:.4f})")
+            else:
+                voted_mask = new_voted_mask
+                pruned_cluster_model = pruned_new_model
+                chosen_mask = "new"
+                logging.info(f"Adopted NEW mask with accuracy {new_test_acc:.4f} (old: {old_test_acc:.4f})")
+
+            # Log which mask was chosen
+            if self.args.enable_wandb:
+                wandb.log(
+                    {
+                        f"Cluster_{group_idx}/MaskComparison/ChosenMask": 0 if chosen_mask == "old" else 1,
+                        "round": round_idx,
+                    }
+                )
+
+        else:
+            # Original behavior: use all proposals
+            voted_mask = vote_mask(mask_proposals, voting_param)
+            logging.info(f"Consolidated {len(mask_proposals)} mask proposals for cluster {group_idx}")
+
+            # Apply voted mask to cluster's model
+            cluster_model = copy.deepcopy(self.cluster_models[group_idx]).cpu()
+            cluster_model.load_state_dict(self.w_groups[group_idx])
+
+            pruned_cluster_model, _, _, _, _, _ = prune_model(
+                cluster_model,
+                prune_percent,
+                prune_way,
+                minimum_channels,
+                divisor,
+                with_mask=voted_mask,
+            )
+
+        # Apply the chosen mask to cluster model and all clients
         self.w_groups[group_idx] = pruned_cluster_model.state_dict()
-
         logging.info(f"Applied voted mask to cluster {group_idx} at round {round_idx}")
 
         # Apply same voted mask to each client's individual model in the cluster
@@ -459,6 +594,7 @@ class PruneClusterAPI(ClusterAPI):
         self.cluster_models[group_idx] = pruned_cluster_model
 
         if self.cluster_first_prune_units[group_idx] is None:
+            units_pruned = sum(mask_info["pruned_filters"] for mask_info in voted_mask.values())
             self.cluster_first_prune_units[group_idx] = units_pruned
             logging.info(f"Recorded {units_pruned} units pruned for cluster {group_idx} first voted mask pruning ")
 
