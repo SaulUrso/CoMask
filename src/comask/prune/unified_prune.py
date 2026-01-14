@@ -1,7 +1,7 @@
 from ..models.cnn import HARBox_CNN
 from ..models.mobilenet import MobileNet
 from fedml.model.cv.resnet_cifar import ResNet
-from tesifedml.models.resnet_cifar import ResNet as ResNet2
+from comask.models.resnet_cifar import ResNet as ResNet2
 
 from . import prune_cnn_by_filter
 from . import prune_mobilenet_by_filter

@@ -148,7 +148,7 @@ def prune_basic_conv2d(
     )
 
     # Create new BasicConv2d block
-    from tesifedml.models.mobilenet import BasicConv2d
+    from comask.models.mobilenet import BasicConv2d
 
     new_block = BasicConv2d(in_channels, out_channels, old_block.conv.kernel_size[0])
     new_block.conv = new_conv
@@ -209,7 +209,7 @@ def prune_depth_separable_conv2d(
     )
 
     # Create new DepthSeparableConv2d block
-    from tesifedml.models.mobilenet import DepthSeperabelConv2d
+    from comask.models.mobilenet import DepthSeperabelConv2d
 
     new_block = DepthSeperabelConv2d(
         in_channels,

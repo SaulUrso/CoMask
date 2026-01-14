@@ -7,10 +7,10 @@ from fedml import mlops
 from fedml.ml.trainer.trainer_creator import create_model_trainer
 from torch import nn
 
-from tesifedml.aggregators.unified_aggregate import aggregate_model
-from tesifedml.clients.prune_client import ModelTrainerSSL, PruneClient
-from tesifedml.prune.unified_prune import prune_model
-from tesifedml.prune.utils import combine_mask
+from comask.aggregators.unified_aggregate import aggregate_model
+from comask.clients.prune_client import ModelTrainerSSL, PruneClient
+from comask.prune.unified_prune import prune_model
+from comask.prune.utils import combine_mask
 
 from .cluster_trainer import ClusterAPI
 
@@ -454,8 +454,8 @@ class PruneClusterImmediateAPI(ClusterAPI):
         identity_mask = {}
         
         # Determine model type and create appropriate masks
-        from tesifedml.models.cnn import HARBox_CNN
-        from tesifedml.models.mobilenet import MobileNet
+        from comask.models.cnn import HARBox_CNN
+        from comask.models.mobilenet import MobileNet
         from fedml.model.cv.resnet_cifar import ResNet
         
         if isinstance(model, HARBox_CNN):

@@ -4,8 +4,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from tesifedml.prune.keywords import KEY_FILTER
-from tesifedml.prune.utils import (
+from comask.prune.keywords import KEY_FILTER
+from comask.prune.utils import (
     computer_conv_threshold,
     computer_weight,
     create_batchnorm2d,
@@ -309,7 +309,7 @@ def prune(model, percent, prune_way="mean_abs", minimum_channels=1, divisor=1, w
         )
 
     # Calculate original parameters for comparison
-    from tesifedml.prune.utils import count_parameters
+    from comask.prune.utils import count_parameters
 
     total_params_before = count_parameters(model)
 

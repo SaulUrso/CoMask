@@ -10,10 +10,10 @@ from fedml.simulation.sp.fedavg.fedavg_api import FedAvgAPI
 from torch import nn
 
 import wandb
-from tesifedml.aggregators.unified_aggregate import aggregate_model
-from tesifedml.clients.prune_client import ModelTrainerSSL, PruneClient
-from tesifedml.prune.unified_prune import prune_model
-from tesifedml.prune.utils import combine_mask
+from comask.aggregators.unified_aggregate import aggregate_model
+from comask.clients.prune_client import ModelTrainerSSL, PruneClient
+from comask.prune.unified_prune import prune_model
+from comask.prune.utils import combine_mask
 
 
 class PruningTrainerAPI(FedAvgAPI):

@@ -8,8 +8,8 @@ from fedml.ml.trainer.my_model_trainer_tag_prediction import ModelTrainerTAGPred
 from fedml.simulation.sp.fedavg.client import Client
 from torch import nn
 
-from tesifedml.prune.keywords import KEY_FILTER
-from tesifedml.prune.utils import ssl_loss
+from comask.prune.keywords import KEY_FILTER
+from comask.prune.utils import ssl_loss
 
 
 class ModelTrainerSSL(ModelTrainerCLS):

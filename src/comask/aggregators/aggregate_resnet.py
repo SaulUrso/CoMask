@@ -4,7 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from tesifedml.models.resnet_cifar import resnet18_cifar
+from comask.models.resnet_cifar import resnet18_cifar
 
 
 def aggregate_resnet_with_masks(

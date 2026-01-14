@@ -4,18 +4,18 @@ FedML training script adapted to use the custom data partitioning
 
 import fedml
 from fedml import FedMLRunner
-from tesifedml.models.resnet_cifar import resnet18_cifar
+from comask.models.resnet_cifar import resnet18_cifar
 from torch.utils.data import DataLoader
 
 # Import your custom adapter and data loading functions
-from tesifedml.clustering.clustering import perform_clustering_svd
-from tesifedml.data.adapters import FedMLAdapter
-from tesifedml.data.dataload import collate_fn, load_my_data
-from tesifedml.data.partition import create_natural_test_sets, partition
-from tesifedml.models.cnn import HARBox_CNN
-from tesifedml.models.mobilenet import MobileNet
-from tesifedml.servers.cluster_pruning_trainer import PruneClusterAPI
-from tesifedml.utils import initialize_and_override_config
+from comask.clustering.clustering import perform_clustering_svd
+from comask.data.adapters import FedMLAdapter
+from comask.data.dataload import collate_fn, load_my_data
+from comask.data.partition import create_natural_test_sets, partition
+from comask.models.cnn import HARBox_CNN
+from comask.models.mobilenet import MobileNet
+from comask.servers.cluster_pruning_trainer import PruneClusterAPI
+from comask.utils import initialize_and_override_config
 
 if __name__ == "__main__":
     initialize_and_override_config()
