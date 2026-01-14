@@ -19,54 +19,51 @@ def perform_clustering_svd(client_data_list, args, output_path="/disc/homes/urso
         if not hasattr(args, field):
             raise AttributeError(f"args is missing required field: '{field}'")
 
-    K = args.n_basis  # 5 by default
+    K = args.n_basis  # 5 by default in experiments
 
-    if args.client_num_in_total == 3000 and K == 5:
-        sim_mat = np.load(output_path)["sim_mat"]
 
-    else:
-        for idx, train_ds_local in enumerate(client_data_list):  # for each client dataset
-            idxs_local = np.arange(len(train_ds_local))
-            labels_local = np.array([train_ds_local[i]["label"] for i in range(len(train_ds_local))])
+    for idx, train_ds_local in enumerate(client_data_list):  # for each client dataset
+        idxs_local = np.arange(len(train_ds_local))
+        labels_local = np.array([train_ds_local[i]["label"] for i in range(len(train_ds_local))])
 
-            # Sort Labels Train
-            idxs_labels_local = np.vstack((idxs_local, labels_local))
-            idxs_labels_local = idxs_labels_local[:, idxs_labels_local[1, :].argsort()]
-            idxs_local = idxs_labels_local[0, :]
-            labels_local = idxs_labels_local[1, :]
+        # Sort Labels Train
+        idxs_labels_local = np.vstack((idxs_local, labels_local))
+        idxs_labels_local = idxs_labels_local[:, idxs_labels_local[1, :].argsort()]
+        idxs_local = idxs_labels_local[0, :]
+        labels_local = idxs_labels_local[1, :]
 
-            uni_labels, cnt_labels = np.unique(labels_local, return_counts=True)
+        uni_labels, cnt_labels = np.unique(labels_local, return_counts=True)
 
-            print(f"Client {idx} - Labels: {uni_labels}, Counts: {cnt_labels}")
+        print(f"Client {idx} - Labels: {uni_labels}, Counts: {cnt_labels}")
 
-            cnt = 0
-            U_temp = []
-            for j in range(len(uni_labels)):  # for each label
-                # obtain subset of the class - get pixel_values for this label's samples
-                class_samples = []
-                for sample_idx in idxs_local[cnt : cnt + cnt_labels[j]]:
-                    pixel_values = train_ds_local[int(sample_idx)]["pixel_values"]
-                    if isinstance(pixel_values, torch.Tensor):
-                        pixel_values = pixel_values.numpy()
-                    class_samples.append(pixel_values.flatten())
+        cnt = 0
+        U_temp = []
+        for j in range(len(uni_labels)):  # for each label
+            # obtain subset of the class - get pixel_values for this label's samples
+            class_samples = []
+            for sample_idx in idxs_local[cnt : cnt + cnt_labels[j]]:
+                pixel_values = train_ds_local[int(sample_idx)]["pixel_values"]
+                if isinstance(pixel_values, torch.Tensor):
+                    pixel_values = pixel_values.numpy()
+                class_samples.append(pixel_values.flatten())
 
-                local_ds1 = np.array(class_samples).T
+            local_ds1 = np.array(class_samples).T
 
-                # always true in practice
-                if K > 0:
-                    # do svd only on subset (we only care about U, the first matrix of the svd)
-                    u1_temp, _, _ = np.linalg.svd(local_ds1, full_matrices=False)
-                    u1_temp = u1_temp / np.linalg.norm(u1_temp, ord=2, axis=0)
-                    U_temp.append(u1_temp[:, :K])
+            # always true in practice
+            if K > 0:
+                # do svd only on subset (we only care about U, the first matrix of the svd)
+                u1_temp, _, _ = np.linalg.svd(local_ds1, full_matrices=False)
+                u1_temp = u1_temp / np.linalg.norm(u1_temp, ord=2, axis=0)
+                U_temp.append(u1_temp[:, :K])
 
-                cnt += cnt_labels[j]
+            cnt += cnt_labels[j]
 
-            U_clients.append(copy.deepcopy(np.hstack(U_temp)))
-            print(f"Client {idx} - Shape of U: {U_clients[-1].shape}")
+        U_clients.append(copy.deepcopy(np.hstack(U_temp)))
+        print(f"Client {idx} - Shape of U: {U_clients[-1].shape}")
 
-        ###################################### Clustering
-        sim_mat = -calculating_adjacency(range(args.client_num_in_total), U_clients)
-        np.fill_diagonal(sim_mat, 0)  # Set diagonal to 0 for self-similarity
+    ###################################### Clustering
+    sim_mat = -calculating_adjacency(range(args.client_num_in_total), U_clients)
+    np.fill_diagonal(sim_mat, 0)  # Set diagonal to 0 for self-similarity
 
     preference = args.preference if isinstance(args.preference, int) else None
 
@@ -76,7 +73,7 @@ def perform_clustering_svd(client_data_list, args, output_path="/disc/homes/urso
 
 
 def flatten(items):
-    """Yield items from any nested iterable; see Reference."""
+    """Yield items from any nested iterable."""
     for x in items:
         if isinstance(x, Iterable) and not isinstance(x, (str, bytes)):
             for sub_x in flatten(x):
@@ -119,7 +116,7 @@ def perform_clustering(matrix, method="affinity", preference=None):
         np.ndarray: Cluster labels for each client.
         np.ndarray (optional): Cluster centers for affinity propagation.
     """
-    if method == "hierarchical":
+    if method == "hierarchical": # Never used in the experiments
         clustering = AgglomerativeClustering(
             n_clusters=2,
             metric="precomputed",
@@ -181,7 +178,7 @@ class RemappedSubset:
         return sample
 
 
-def calculating_adjacency_parallel(clients_idxs, U):
+def calculating_adjacency_parallel(clients_idxs, U): #use this for efficiency on FEMNIST
     nclients = len(clients_idxs)
 
     def compute_similarity(U1, U2):
