@@ -1,0 +1,27 @@
+program: scripts/personal_pruning_script.py 
+method: grid  # or 'grid', 'random'
+metric:
+  name: Global/Test/Acc  # FedML typically logs as 'test/acc' or 'test_acc'
+  goal: maximize
+
+parameters:
+  train_args:
+    parameters:
+      prune_percent: 
+        values: [0.05,0.1,0.15,0.2,0.25]
+
+      learning_rate:
+        values: [0.01]
+
+      minimum_channels:
+        values: [8]
+      
+command:
+  - uv
+  - run
+  - --env-file
+  - .env
+  - --
+  - ${program}
+  - --cf
+  - configs/cifar_config.yaml
