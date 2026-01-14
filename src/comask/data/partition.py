@@ -70,7 +70,6 @@ def dirichlet_partition(
             proportions: np.ndarray[Any, np.dtype[np.float64]] = rng.dirichlet(
                 np.repeat(data_split_alpha, num_clients)
             )
-            # print(proportions)
             class_proportions.append(proportions)
 
         for k in range(K):
@@ -93,7 +92,7 @@ def dirichlet_partition(
         if trial >= 10:
             raise ValueError(f"Max number of attempts {trial} reached, try a different alpha.")
 
-        # TODO: hotfix to ensure test and train have same distribution. Fix later.
+        # NOTE: hotfix to ensure test and train have same distribution.
         if min_size < min_require_size:
             raise ValueError(f"Min size of {min_size} < {min_require_size} , try a different alpha.")
 
@@ -123,14 +122,13 @@ def uniform_partition(
     num_classes = len(np.unique(y))
     client_data_indices: Dict[int, List[int]] = defaultdict(list)
 
-    # Collect sample indices by class
     class_indices = {c: np.where(y == c)[0] for c in range(num_classes)}
 
     rng = np.random.default_rng(seed)
 
     for c, indices in class_indices.items():
-        rng.shuffle(indices)  # Shuffle indices for each class
-        splits = np.array_split(indices, num_clients)  # Split indices among clients
+        rng.shuffle(indices) 
+        splits = np.array_split(indices, num_clients) 
         for client_id, split in enumerate(splits):
             client_data_indices[client_id].extend(split)
 
@@ -303,11 +301,6 @@ def create_dataloaders(
     dataloaders = []
 
     for dataset in client_datasets:
-        # Set the format to PyTorch tensors
-        # This tells HF dataset to return torch tensors instead of Python objects
-        # dataset.set_format(type="torch")
-
-        # Create DataLoader
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, **dataloader_kwargs)  # type: ignore
         dataloaders.append(dataloader)
 
@@ -323,11 +316,6 @@ def create_dataloaders_2(
     dataloaders = []
 
     for dataset in client_datasets:
-        # Set the format to PyTorch tensors
-        # This tells HF dataset to return torch tensors instead of Python objects
-        # dataset.set_format(type="torch")
-
-        # Create DataLoader
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, **dataloader_kwargs)  # type: ignore
         dataloaders.append(dataloader)
 
@@ -387,14 +375,11 @@ def create_personalized_test_sets(
     client_class_list = []
 
     for client_data in client_data_list:
-        # obtain the classes of the client from its dataset
         classes = np.unique(client_data[label_column])
         client_class_list.append(classes)
 
-        # Filter test set indices for the client's classes
         client_test_indices = [idx for idx, label in enumerate(test_set[label_column]) if label in classes]
 
-        # Create personalized test dataset for this client
         client_test_set = test_set.select(client_test_indices)
         client_test_sets.append(client_test_set)
 
@@ -433,7 +418,6 @@ def create_natural_test_sets(
         if feature_column not in client_data.column_names:
             raise ValueError(f"Feature column '{feature_column}' not found in client {client_idx} dataset columns: {client_data.column_names}")
         
-        # Get unique feature values from this client's training data
         client_feature_values = np.unique(client_data[feature_column])
 
         assert len(client_feature_values) == 1
@@ -446,7 +430,6 @@ def create_natural_test_sets(
         
         assert len(matching_indices) == len(list(set(matching_indices)))
         
-        # Create personalized test dataset for this client
         if matching_indices:
             client_test_set = test_set.select(matching_indices)
         else:
@@ -454,11 +437,6 @@ def create_natural_test_sets(
             client_test_set = None
         
         client_test_sets.append(client_test_set)
-
-    # print(f"✓ Created {len(client_test_sets)} personalized test sets based on '{feature_column}'")
-    # print(f"✓ Test samples per client: min={min([len(ds) for ds in client_test_sets if ds is not None])}, "
-    #       f"max={max([len(ds) for ds in client_test_sets if ds is not None])}, "
-    #       f"mean={np.mean([len(ds) for ds in client_test_sets if ds is not None]):.1f}")
 
     return client_test_sets
 
@@ -485,19 +463,16 @@ def create_and_save_partition(
     Returns:
         Dictionary mapping client_id -> list of indices
     """
-    # Extract labels
+
     labels = np.array(dataset[label_column])
 
-    # Use YOUR partition_labels function
+    # Use partition_labels function
     client_indices = partition_labels(method, labels, num_clients, **partition_kwargs)
 
     # Save indices
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
     with open(save_path, "wb") as f:
         pickle.dump(client_indices, f)
-
-    # print(f"✓ Created {method} partition with {num_clients} clients")
-    # print(f"✓ Saved to {save_path}")
 
     return client_indices
 
@@ -506,7 +481,6 @@ def load_partition_indices(load_path: str) -> Dict[int, List[int]]:
     """Load saved partition indices"""
     with open(load_path, "rb") as f:
         partitions = pickle.load(f)
-    # print(f"✓ Loaded partition from {load_path}")
     return partitions
 
 
@@ -550,19 +524,11 @@ def partition_dataset_natural(
             raise ValueError(f"Expected {min_samples_per_client} samples but found {len(indices)} samples.")
         client_data_indices[value] = indices
 
-    # Create client datasets
     client_datasets = []
     for value in sorted(client_data_indices.keys()):
         indices = client_data_indices[value]
         client_dataset = dataset.select(indices)
         client_datasets.append(client_dataset)
-
-    # print(f"✓ Created natural partition with {len(client_datasets)} clients based on '{feature_column}'")
-    # print(
-    #     f"✓ Samples per client: min={min([len(ds) for ds in client_datasets])}, "
-    #     f"max={max([len(ds) for ds in client_datasets])}, "
-    #     f"mean={np.mean([len(ds) for ds in client_datasets]):.1f}"
-    # )
 
     return client_datasets
 

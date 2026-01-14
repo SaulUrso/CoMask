@@ -11,6 +11,7 @@ from sklearn.model_selection import train_test_split
 from .data_pre import NUM_OF_TOTAL_USERS, load_data
 
 # Add the path to access data_pre.py functions
+# Assuming it is in main directory
 sys.path.append(os.path.join(os.path.dirname(__file__), "../../../large_scale_HARBox"))
 
 
@@ -32,8 +33,6 @@ def load_cifar10():
 
     assert isinstance(dataset, DatasetDict)
 
-    # Define the torchvision transforms
-    # TODO: change transform
     transform_tv = T.Compose(
         [
             T.ToTensor(),
@@ -45,10 +44,9 @@ def load_cifar10():
     )
 
     def transforms_tv(examples):
-        # Apply the torchvision transforms
         pixel_values = [
             transform_tv(image.convert("RGB")) for image in examples["img"]
-        ]  # Ensure image is in RGB format
+        ]
         return {"pixel_values": pixel_values, "label": examples["label"]}
 
     return dataset, transforms_tv
@@ -59,8 +57,6 @@ def load_femnist(test_only_users=None, test_only_user_seed=42):
 
     assert isinstance(dataset, DatasetDict)
 
-    # dataset["train"] = dataset["train"].sort("writer_id")
-
     transform_tv = T.Compose(
         [
             T.ToTensor(),
@@ -68,7 +64,8 @@ def load_femnist(test_only_users=None, test_only_user_seed=42):
     )
 
     def transforms_tv(examples):
-        # FEMNIST is 28 x 28 greyscale images (only 1 channel, but you can replicate if need 3, ofc it's useless)
+        # FEMNIST is 28 x 28 greyscale images 
+        # (only 1 channel, but you can replicate if need 3, ofc it's redundant)
         pixel_values = [transform_tv(image.convert("L")) for image in examples["image"]]
         return {"pixel_values": pixel_values, "label": examples["label"]}
 
@@ -99,14 +96,12 @@ def load_femnist(test_only_users=None, test_only_user_seed=42):
             new_train = dataset["train"].select(train_indices)
             test_only = dataset["train"].select(test_only_indices)
 
-            # Create new DatasetDict with test_only split
             dataset = DatasetDict({"train": new_train, "test_only": test_only})
         else:
             raise ValueError("test_only_users must be None or an integer")
 
     # Now create train/test splits from remaining train data
     # Group remaining train data by writer_id
-    # print("iterating writer")
     writer_data = {}
     for i, writer_id in enumerate(dataset["train"]["writer_id"]):
         if writer_id not in writer_data:
@@ -122,11 +117,10 @@ def load_femnist(test_only_users=None, test_only_user_seed=42):
         if len(indices) >= 100:
             # Split 80/20 for train/test
             indices_array = np.array(indices)
-            # labels = [dataset["train"]["character"][i] for i in indices]
 
             train_idx, test_idx = train_test_split(
                 indices_array, test_size=0.2, random_state=42
-            )  # TODO: discuss stratify=labels
+            )  # stratify=labels does not work unfortunately
             train_indices.extend(train_idx.tolist())
             test_indices.extend(test_idx.tolist())
         else:
@@ -159,7 +153,6 @@ def _load_user_data(user_id):
 def _split_user_data(x_data, y_data, user_id):
     """Split a user's data into train/test (80/20)."""
     if x_data.shape[0] < 5:
-        # If user has very little data, put all in train
         return {
             "train": (x_data, y_data, np.full(x_data.shape[0], user_id)),
             "test": (np.empty((0, x_data.shape[1])), np.empty(0), np.empty(0, dtype=int)),
@@ -216,7 +209,7 @@ def _combine_split_data(split_data):
     combined_y = np.concatenate(split_data["y"], axis=0)
     combined_users = np.concatenate(split_data["users"], axis=0)
 
-    # Reshape from 900 to 30x30
+    # Reshape from 900 to 30x30, as it is done in FedConv
     combined_x_reshaped = combined_x.reshape(-1, 30, 30)
 
     return combined_x_reshaped, combined_y, combined_users
@@ -229,7 +222,7 @@ def _create_dataset_dict(data_splits):
     for split_name in ["train", "test", "test_only"]:
         x_data, y_data, user_data = _combine_split_data(data_splits[split_name])
 
-        if x_data.shape[0] > 0:  # Only create dataset if there's data
+        if x_data.shape[0] > 0: 
             dataset = Dataset.from_dict(
                 {
                     "features": x_data,
@@ -244,7 +237,6 @@ def _create_dataset_dict(data_splits):
 
 
 def load_harbox(test_only_users=None, test_only_user_seed=42):
-    # TODO: check how split is done for test only
     """
     Load HARBox dataset using functions from data_pre.py.
 
@@ -256,11 +248,10 @@ def load_harbox(test_only_users=None, test_only_user_seed=42):
         dataset: DatasetDict with train, test, and optionally test_only splits
         transforms_tv: Transform function to apply to examples
     """
-    # Convert test_only_users to 0-indexed set
     test_only_user_ids = []
-    if test_only_users is not None and test_only_users > 0:
+    if test_only_users is not None and test_only_users > 0: 
+        # never True in the experiments for this dataset
         if isinstance(test_only_users, int):
-            # Randomly sample test_only_users number of user IDs
             rng = np.random.default_rng(test_only_user_seed)
             all_user_ids = list(range(1, NUM_OF_TOTAL_USERS + 1))
             sampled_ids = rng.choice(all_user_ids, size=test_only_users, replace=False)
@@ -268,17 +259,14 @@ def load_harbox(test_only_users=None, test_only_user_seed=42):
         else:
             raise ValueError("test_only_users must be None or an integer")
 
-    # Collect and organize data from all users
     data_splits = _collect_user_data(test_only_user_ids)
 
-    # Check if any data was loaded
     if not any(data_splits[split]["x"] for split in ["train", "test"]):
         raise ValueError("No data could be loaded from any user")
 
-    # Create DatasetDict
     dataset = _create_dataset_dict(data_splits)
 
-    # TODO: CHANGE IF YOU USE SOME CLIENTS FOR SPLITS
+    # NOTE: Change if you use some clients for separate test
     transform_tv = T.Compose([T.ToTensor(),T.Normalize(-1.777955, 17.569693) ]) 
 
     def transforms_tv(examples):

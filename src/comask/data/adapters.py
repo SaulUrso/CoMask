@@ -13,86 +13,6 @@ import wandb
 
 from .dataload import collate_fn, combine_batches
 
-# Import your existing functions
-
-# class FlowerAdapter:
-#     """Adapter for Flower FL framework"""
-
-#     @staticmethod
-#     def create_client_datasets(
-#         partitions: Dict[int, List[int]],
-#         full_dataset: HFDataset,
-#         transform_fn
-#     ) -> Dict[int, HFDatasetWrapper]:
-#         """
-#         Create client datasets for Flower.
-
-#         Args:
-#             partitions: Dict mapping client_id -> list of indices
-#             full_dataset: Full HuggingFace dataset
-#             transform_fn: Your transforms_tv function from dataload.py
-
-#         Returns:
-#             Dict mapping client_id -> PyTorch-compatible dataset
-#         """
-#         client_datasets = {}
-
-#         for client_id, indices in partitions.items():
-#             # Select subset using HF's select method
-#             client_hf_dataset = full_dataset.select(indices)
-#             # Wrap it for PyTorch compatibility
-#             client_datasets[client_id] = HFDatasetWrapper(client_hf_dataset, transform_fn)
-
-#         return client_datasets
-
-#     @staticmethod
-#     def create_client_dataloaders(
-#         partitions: Dict[int, List[int]],
-#         full_dataset: HFDataset,
-#         transform_fn,
-#         batch_size: int = 32,
-#         shuffle: bool = True
-#     ) -> Dict[int, DataLoader]:
-#         """
-#         Create DataLoaders for each client (ready to use in Flower).
-
-#         Returns:
-#             Dict mapping client_id -> DataLoader
-#         """
-#         client_datasets = FlowerAdapter.create_client_datasets(
-#             partitions, full_dataset, transform_fn
-#         )
-
-#         client_dataloaders = {}
-#         for client_id, dataset in client_datasets.items():
-#             client_dataloaders[client_id] = DataLoader(
-#                 dataset,
-#                 batch_size=batch_size,
-#                 shuffle=shuffle,
-#                 collate_fn=collate_fn
-#             )
-
-#         return client_dataloaders
-
-#     @staticmethod
-#     def get_partition_fn(partitions: Dict[int, List[int]], full_dataset: HFDataset, transform_fn):
-#         """
-#         Create a partition function for Flower's simulation API.
-
-#         Usage in Flower:
-#             partition_fn = FlowerAdapter.get_partition_fn(partitions, train_dataset, transforms_tv)
-#             trainloaders, valloaders, testloader = partition_fn(batch_size=32)
-#         """
-#         def partition_fn(batch_size: int = 32):
-#             trainloaders = FlowerAdapter.create_client_dataloaders(
-#                 partitions, full_dataset, transform_fn, batch_size=batch_size, shuffle=True
-#             )
-#             # Return as list for Flower
-#             return list(trainloaders.values()), [], None  # train, val, test
-
-#         return partition_fn
-
-
 class FedMLAdapter:
     """Adapter for FedML framework"""
 
@@ -204,30 +124,26 @@ class FedMLAdapter:
         null_idexes = []
 
         for client_id, client_train_dataset in enumerate(train_partitions):
-            # Handle train/validation split if requested
             if validation_split is not None:
                 client_train_dataset = client_train_dataset.shuffle(seed=client_id)
                 dataset_size = len(client_train_dataset)
                 val_size = int(dataset_size * validation_split)
                 train_size = dataset_size - val_size
                 
-                # Split the dataset indices
+                # Create train and validation subsets
                 indices = list(range(dataset_size))
                 train_indices = indices[:train_size]
                 val_indices = indices[train_size:]
                 
-                # Create train and validation subsets
+         
                 client_train_split = client_train_dataset.select(train_indices)
                 client_val_split = client_train_dataset.select(val_indices)
                 
-                # Set transforms
                 client_train_split = client_train_split.with_transform(transform_fn)
                 client_val_split = client_val_split.with_transform(transform_fn)
                 
-                # Store the actual training size after split
                 train_data_local_num_dict[client_id] = len(client_train_split)
                 
-                # Create training dataloader
                 train_data_local_dict[client_id] = DataLoader(
                     client_train_split,  # type: ignore
                     batch_size=batch_size,
@@ -235,7 +151,6 @@ class FedMLAdapter:
                     collate_fn=collate_fn,
                 )
                 
-                # Create validation dataloader
                 val_data_local_dict[client_id] = DataLoader(
                     client_val_split,  # type: ignore
                     batch_size=batch_size,
@@ -252,7 +167,6 @@ class FedMLAdapter:
                     shuffle=True,
                     collate_fn=collate_fn,
                 )
-                # No validation data when validation_split is None
                 val_data_local_dict[client_id] = None
 
             # Create local test dataset for this client
@@ -271,12 +185,7 @@ class FedMLAdapter:
                 null_idexes.append(client_id)
                 test_data_local_dict[client_id] = None
 
-        # print(f"NULL_COUNT: {null_count}")
-        # print(f"NULL_idexes: {null_idexes}")
-
         if full_batch:
-            # train_data_global = combine_batches(train_data_global)
-            # test_data_global = combine_batches(test_data_global)
             train_data_local_dict = {
                 cid: combine_batches(train_data_local_dict[cid]) for cid in train_data_local_dict.keys()
             }
@@ -290,8 +199,6 @@ class FedMLAdapter:
                     for cid in val_data_local_dict.keys()
                 }
 
-            # assert_one_batch(train_data_global, "train_data_global")
-            # assert_one_batch(test_data_global, "test_data_global")
             for cid, loader in train_data_local_dict.items():
                 assert_one_batch(loader, f"train_data_local_dict[{cid}]")
             for cid, loader in test_data_local_dict.items():
@@ -300,7 +207,7 @@ class FedMLAdapter:
                 for cid, loader in val_data_local_dict.items():
                     assert_one_batch(loader, f"val_data_local_dict[{cid}]")
 
-        # Log label distributions if requested
+        # Log label distributions
         if log_distributions:
             FedMLAdapter.log_label_distribution(train_partitions, train_dataset, "train")
             if test_partitions is not None:
@@ -309,26 +216,26 @@ class FedMLAdapter:
         # Return tuple with validation data if validation split was requested
         if validation_split is not None:
             return (
-                len(train_dataset),  # train_data_num
-                len(test_dataset),  # test_data_num
-                train_data_global,  # train_data_global
-                test_data_global,  # test_data_global
-                train_data_local_num_dict,  # train_data_local_num_dict
-                train_data_local_dict,  # train_data_local_dict
-                test_data_local_dict,  # test_data_local_dict
-                class_num,  # class_num
-                val_data_local_dict,  # val_data_local_dict
+                len(train_dataset), 
+                len(test_dataset), 
+                train_data_global, 
+                test_data_global, 
+                train_data_local_num_dict, 
+                train_data_local_dict,  
+                test_data_local_dict, 
+                class_num,  
+                val_data_local_dict,  
             )
         else:
             return (
-                len(train_dataset),  # train_data_num
-                len(test_dataset),  # test_data_num
-                train_data_global,  # train_data_global
-                test_data_global,  # test_data_global
-                train_data_local_num_dict,  # train_data_local_num_dict
-                train_data_local_dict,  # train_data_local_dict
-                test_data_local_dict,  # test_data_local_dict
-                class_num,  # class_num
+                len(train_dataset), 
+                len(test_dataset), 
+                train_data_global, 
+                test_data_global, 
+                train_data_local_num_dict,  
+                train_data_local_dict,  
+                test_data_local_dict,  
+                class_num,  
             )
 
 
