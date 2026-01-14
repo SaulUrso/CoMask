@@ -1,14 +1,14 @@
 program: scripts/cluster_prune_script.py 
-method: grid  # or 'grid', 'random'
+method: grid  
 metric:
-  name: Server/Test/Acc  # FedML typically logs as 'test/acc' or 'test_acc'
+  name: Server/Test/Acc  
   goal: maximize
 
 parameters:
   train_args:
     parameters:
       preference:
-        values : [-90] # [-200, -90, -43]
+        values : [-200, -90, -43] # [-200, -90, -43]
       
       pruning: 
         values : ["proposal"]

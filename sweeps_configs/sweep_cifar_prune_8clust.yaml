@@ -8,7 +8,7 @@ parameters:
   train_args:
     parameters:
       preference:
-        values : [-60]
+        values : [-23]
 
       pruning:
         values : ["proposal"]
