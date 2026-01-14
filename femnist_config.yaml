@@ -6,6 +6,8 @@ data_args:
   dataset: "femnist"
   partition_method: "natural"
   feature_col: writer_id
+  validation_split: 0.1 # only used by cluster_prune_script
+
 
 model_args:
   model: "mobilenet"
@@ -15,12 +17,25 @@ train_args:
   client_id_list: "[]"  # Adjust based on num_clients
   client_num_in_total: 100 # ignored
   client_num_per_round: 30
-  comm_round: 200
-  learning_rate: 0.01
-  weight_decay: 0.001
+  comm_round: 500
+  learning_rate: 0.1
+  weight_decay: 0
   epochs: 5
   batch_size: -1
   client_optimizer: "sgd"
+# cluster params
+  n_basis: 5
+  preference: median  # -200, -90, -43
+  group_method: clusters
+# pruning params
+  pruning: "proposal" # "random"
+  ssl_coefficient: 0
+  prune_percent: 0.1
+  accuracy_threshold: 0.3
+  consolidation_percentage: 0.1
+  consensus_percentage: 0.5
+# for testing jaccard
+  # test_jaccard: true
 
 
 validation_args:
@@ -37,6 +52,6 @@ comm_args:
 tracking_args:
   enable_wandb: true
   wandb_entity: s-urso2
-  wandb_project: "FedFEMNIST"
+  wandb_project: "Test" # FedFEMNIST
   run_name: "run_mobilenet_femnist"
 
