@@ -177,7 +177,7 @@ class PruneClient(Client):
         super().__init__(
             client_idx, local_training_data, local_test_data, local_sample_number, args, device, model_trainer
         )
-        self.model_trainer = model_trainer  # also done in super, but pylance won't show me types otherwhise
+        self.model_trainer = model_trainer  # also done in super, but pylance won't show types otherwhise
         self.local_val_data = local_val_data
 
     def update_local_dataset(
@@ -201,10 +201,9 @@ class PruneClient(Client):
         if self.args.pruning != "random":
             pass
 
-        # decide which args object to pass to the trainer (allow temporary override)
         trainer_args = args_override if args_override is not None else self.args
 
-        # finetuning
+        # training
         self.model_trainer.train(self.local_training_data, self.device, trainer_args)
         weights = self.model_trainer.get_model_params()
         return weights
