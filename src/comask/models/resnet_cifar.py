@@ -1,3 +1,8 @@
+"""mobilenet in pytorch
+
+    Modified from FedML
+"""
+
 import math
 
 import torch.nn as nn
@@ -24,7 +29,6 @@ def conv3x3(in_planes, out_planes, stride=1):
 
 
 def norm2d(planes, num_channels_per_group=32):
-    # print("num_channels_per_group:{}".format(num_channels_per_group))
     if num_channels_per_group > 0:
         return GroupNorm2d(
             planes, num_channels_per_group, affine=True, track_running_stats=False
@@ -164,8 +168,6 @@ class ResNet(nn.Module):
         return x
     
     def _make_layer(self, block, planes, blocks, stride=1, group_norm=0):
-        # downsample = None
-        # if stride != 1 or self.inplanes != planes * block.expansion:
         layers = []
 
         # First block with potential stride and always has downsample
