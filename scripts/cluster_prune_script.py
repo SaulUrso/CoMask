@@ -4,7 +4,6 @@ FedML training script adapted to use the custom data partitioning
 
 import fedml
 from fedml import FedMLRunner
-from comask.models.resnet_cifar import resnet18_cifar
 from torch.utils.data import DataLoader
 
 # Import your custom adapter and data loading functions
@@ -14,6 +13,7 @@ from comask.data.dataload import collate_fn, load_my_data
 from comask.data.partition import create_natural_test_sets, partition
 from comask.models.cnn import HARBox_CNN
 from comask.models.mobilenet import MobileNet
+from comask.models.resnet_cifar import resnet18_cifar
 from comask.servers.cluster_pruning_trainer import PruneClusterAPI
 from comask.utils import initialize_and_override_config
 
@@ -105,10 +105,20 @@ if __name__ == "__main__":
     print(f"  - Test samples: {dataset[1]}")
     print(f"  - Output dimension (classes): {output_dim}")
 
-    # start clustering
-    cluster_labels, cluster_centers, sim_mat = perform_clustering_svd(
-        [client_data.with_transform(transforms_tv) for client_data in train_partitions], args
-    )
+    # start clustering or create single cluster
+    single_cluster = getattr(args, "single_cluster", False)
+
+    if single_cluster:
+        # Enforce single cluster with all clients
+        cluster_labels = [0] * len(train_partitions)
+        cluster_centers = None
+        sim_mat = None
+        print("  - Single cluster mode: all clients in one cluster")
+    else:
+        cluster_labels, cluster_centers, sim_mat = perform_clustering_svd(
+            [client_data.with_transform(transforms_tv) for client_data in train_partitions], args
+        )
+
     args.cluster_indexes = cluster_labels
 
     print(f"  - Number of clusters: {len(set(cluster_labels))}")
