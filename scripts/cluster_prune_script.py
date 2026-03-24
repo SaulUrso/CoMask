@@ -2,6 +2,8 @@
 FedML training script adapted to use the custom data partitioning
 """
 
+import math
+
 import fedml
 from fedml import FedMLRunner
 from torch.utils.data import DataLoader
@@ -41,9 +43,20 @@ if __name__ == "__main__":
 
     method_name = getattr(args, "method_name", "dirichlet")
     feature_col = getattr(args, "feature_col", None)
+    partition_kwargs = {
+        "data_split_alpha": getattr(args, "data_split_alpha", 0.5),
+        "seed": getattr(args, "seed", 0),
+        "min_require_size": getattr(args, "min_require_size", 10),
+        "self_balancing": getattr(args, "self_balancing", True),
+    }
 
     train_partitions = partition(
-        train_dataset, args.partition_method, method_name=method_name, client_num=num_clients, feature_col=feature_col
+        train_dataset,
+        args.partition_method,
+        method_name=method_name,
+        client_num=num_clients,
+        feature_col=feature_col,
+        **partition_kwargs,
     )
 
     if args.partition_method == "natural" and feature_col is not None:
@@ -55,9 +68,22 @@ if __name__ == "__main__":
             method_name=method_name,
             client_num=num_clients,
             feature_col=feature_col,
+            **partition_kwargs,
         )
 
     args.client_num_in_total = len(train_partitions)
+
+    # Support fractional participation ratio: e.g. 0.1 -> 10% of total clients per round.
+    client_num_per_round = getattr(args, "client_num_per_round", None)
+    if isinstance(client_num_per_round, (int, float)) and 0 < client_num_per_round < 1:
+        args.client_num_per_round = max(1, math.ceil(args.client_num_in_total * client_num_per_round))
+        print(
+            "  - client_num_per_round interpreted as fraction: "
+            f"{client_num_per_round} -> {args.client_num_per_round} clients/round"
+        )
+    elif isinstance(client_num_per_round, float):
+        # FedML expects an integer count when this value is >= 1.
+        args.client_num_per_round = int(client_num_per_round)
 
     # no need to partition the test_only dataset
 
