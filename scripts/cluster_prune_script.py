@@ -43,12 +43,34 @@ if __name__ == "__main__":
 
     method_name = getattr(args, "method_name", "dirichlet")
     feature_col = getattr(args, "feature_col", None)
-    partition_kwargs = {
-        "data_split_alpha": getattr(args, "data_split_alpha", 0.5),
-        "seed": getattr(args, "seed", 0),
-        "min_require_size": getattr(args, "min_require_size", 10),
-        "self_balancing": getattr(args, "self_balancing", True),
-    }
+
+    # Build kwargs for label-based partitioning with method-specific parameters.
+    seed = getattr(args, "seed", 0)
+    if method_name == "dirichlet":
+        partition_kwargs = {
+            "data_split_alpha": getattr(args, "data_split_alpha", 0.5),
+            "seed": seed,
+            "min_require_size": getattr(args, "min_require_size", 10),
+            "self_balancing": getattr(args, "self_balancing", True),
+        }
+    elif method_name == "class":
+        partition_kwargs = {
+            "classes": getattr(args, "classes", 2),
+            "seed": seed,
+        }
+    elif method_name == "shard":
+        partition_kwargs = {
+            "shards_per_client": getattr(args, "shards_per_client", 2),
+            "seed": seed,
+        }
+    elif method_name == "uniform":
+        partition_kwargs = {
+            "seed": seed,
+        }
+    else:
+        partition_kwargs = {
+            "seed": seed,
+        }
 
     train_partitions = partition(
         train_dataset,
