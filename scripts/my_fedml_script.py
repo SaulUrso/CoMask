@@ -61,6 +61,16 @@ if __name__ == "__main__":
 
     args.client_num_in_total = len(train_partitions)
 
+    client_num_per_round = getattr(args, "client_num_per_round", None)
+    if client_num_per_round is not None:
+        client_num_per_round = float(client_num_per_round)
+        if client_num_per_round < 1:
+            absolute_clients = max(1, int(round(args.client_num_in_total * client_num_per_round)))
+            args.client_num_per_round = absolute_clients
+            print(
+                f"  - client_num_per_round interpreted as fraction ({client_num_per_round}) -> {absolute_clients} clients"
+            )
+
     # no need to partition the test_only dataset
 
     dataset = FedMLAdapter.create_fedml_data_structure(

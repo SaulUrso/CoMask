@@ -59,6 +59,16 @@ if __name__ == "__main__":
 
     args.client_num_in_total = len(train_partitions)
 
+    client_num_per_round = getattr(args, "client_num_per_round", None)
+    if client_num_per_round is not None:
+        client_num_per_round = float(client_num_per_round)
+        if client_num_per_round < 1:
+            absolute_clients = max(1, int(round(args.client_num_in_total * client_num_per_round)))
+            args.client_num_per_round = absolute_clients
+            print(
+                f"  - client_num_per_round interpreted as fraction ({client_num_per_round}) -> {absolute_clients} clients"
+            )
+
     # no need to partition the test_only dataset
 
     dataset = FedMLAdapter.create_fedml_data_structure(
@@ -102,11 +112,20 @@ if __name__ == "__main__":
     print(f"  - Test samples: {dataset[1]}")
     print(f"  - Output dimension (classes): {output_dim}")
 
-    # start clustering
-    cluster_labels, cluster_centers, sim_mat = perform_clustering_svd(
-        [client_data.with_transform(transforms_tv) for client_data in train_partitions], args
-    )
-    args.cluster_indexes = cluster_labels
+    single_cluster = getattr(args, "single_cluster", False)
+    if isinstance(single_cluster, str):
+        single_cluster = single_cluster.lower() in {"1", "true", "yes", "y", "on"}
+
+    if single_cluster:
+        cluster_labels = [0] * len(train_partitions)
+        args.cluster_indexes = cluster_labels
+        print("  - single_cluster=True, skipping clustering and assigning all clients to cluster 0")
+    else:
+        # start clustering
+        cluster_labels, _, _ = perform_clustering_svd(
+            [client_data.with_transform(transforms_tv) for client_data in train_partitions], args
+        )
+        args.cluster_indexes = cluster_labels
 
     print(f"  - Number of clusters: {len(set(cluster_labels))}")
 
