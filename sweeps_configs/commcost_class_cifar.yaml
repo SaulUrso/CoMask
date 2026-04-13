@@ -19,6 +19,9 @@ parameters:
       accuracy_threshold:
         values: [0.1]
 
+      client_num_per_round: 
+        values: [0.1]
+
       prune_percent: 
         values: [0.1]
 
@@ -29,7 +32,7 @@ parameters:
         values: [0.5]
       
       client_num_in_total:
-        values: [1000,500,250,100,50]
+        values: [500,250,100,50] # 1000
 
   validation_args:
     parameters:
@@ -44,8 +47,11 @@ parameters:
       method_name: 
         values: ["class"]
 
+      seed:
+        values: [0, 1, 2, 3, 4]
+
       classes: 
-        values: [2,4,6]
+        values: [4]
     
 
 

@@ -17,7 +17,7 @@ train_args:
   client_id_list: "[]" 
   client_num_in_total: 100 
   client_num_per_round: 0.1
-  comm_round: 500
+  comm_round: 150
   learning_rate: 0.1
   weight_decay: 0.0001
   epochs: 5

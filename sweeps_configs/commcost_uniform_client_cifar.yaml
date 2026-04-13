@@ -18,6 +18,9 @@ parameters:
 
       accuracy_threshold:
         values: [0.1]
+      
+      client_num_per_round: 
+        values: [0.1]
 
       prune_percent: 
         values: [0.1]
@@ -43,6 +46,9 @@ parameters:
 
       method_name: 
         values: ["uniform"]
+
+      seed:
+        values: [0, 1, 2, 3, 4]
   
   
       
