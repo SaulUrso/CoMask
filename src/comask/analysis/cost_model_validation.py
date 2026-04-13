@@ -6,6 +6,7 @@ import math
 import os
 import shutil
 import tempfile
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
@@ -55,6 +56,45 @@ class SweepValidationResult:
     group_id: int
     proposal_cluster_id: Optional[int]
     results: List[RunValidationResult]
+
+
+@dataclass
+class GroupPredictionSeries:
+    rounds: List[int]
+    mean_curve: List[float]
+    per_run_curves: List[List[float]] = field(default_factory=list)
+
+
+@dataclass
+class GroupedClientValidationResult:
+    total_clients: int
+    run_count: int
+    run_paths: List[str] = field(default_factory=list)
+    run_ids: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+    rounds: List[int] = field(default_factory=list)
+    empirical_mean_curve: List[float] = field(default_factory=list)
+
+    average_prune_ratio: Optional[float] = None
+    average_global_probability: Optional[float] = None
+    average_step_probabilities: List[float] = field(default_factory=list)
+
+    predictions: Dict[str, GroupPredictionSeries] = field(default_factory=dict)
+    metrics_macro: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    metrics_micro: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass
+class SweepGroupedValidationResult:
+    sweep_path: str
+    gamma: int
+    rho: float
+    group_id: int
+    proposal_cluster_id: Optional[int]
+    max_rounds: Optional[int]
+    base_validation: SweepValidationResult
+    grouped_results: List[GroupedClientValidationResult]
 
 
 def _is_finite_number(value: Any) -> bool:
@@ -381,6 +421,7 @@ def _predict_cumulative_cost(
     rho: float,
     global_p: Optional[float] = None,
     p_steps: Optional[Sequence[float]] = None,
+    prune_correction: Optional[str] = None,
     min_probability: float = 1e-12,
 ) -> np.ndarray:
     if p_steps is None and global_p is None:
@@ -403,7 +444,13 @@ def _predict_cumulative_cost(
         tau.append(tau[-1] + float(delta_t))
 
     per_step_prune = float(prune_ratio) / float(gamma)
-    q_values = [max(0.0, 1.0 - (j * per_step_prune)) for j in range(gamma + 1)]
+
+    if prune_correction is None:
+        q_values = [max(0.0, 1.0 - (j * per_step_prune)) for j in range(gamma + 1)]
+    elif prune_correction == "quadratic":
+        q_values = [max(0.0, 1.0 - (j * per_step_prune)) ** 2 for j in range(gamma + 1)]
+    else:
+        raise ValueError(f"unsupported prune_correction={prune_correction!r}")
 
     first_round = int(rounds[0])
     predicted: List[float] = []
@@ -611,6 +658,7 @@ def validate_run_cost_model(
     group_id: int = 0,
     proposal_cluster_id: Optional[int] = 0,
     max_rounds: Optional[int] = None,
+    prune_correction: Optional[str] = None,
 ) -> RunValidationResult:
     run_path = "/".join(run.path) if hasattr(run, "path") else run.id
 
@@ -735,6 +783,7 @@ def validate_run_cost_model(
         gamma=gamma,
         rho=rho,
         global_p=result.global_probability,
+        prune_correction=prune_correction,
     )
     predicted_step = _predict_cumulative_cost(
         rounds=analysis_rounds,
@@ -745,6 +794,7 @@ def validate_run_cost_model(
         gamma=gamma,
         rho=rho,
         p_steps=p_steps,
+        prune_correction=prune_correction,
     )
 
     predicted_drop_rounds_global = _predict_consolidation_rounds(
@@ -806,6 +856,7 @@ def validate_sweep_cost_model(
     proposal_cluster_id: Optional[int] = 0,
     max_rounds: Optional[int] = None,
     api_timeout: int = 120,
+    prune_correction: Optional[str] = None,
 ) -> SweepValidationResult:
     api = wandb.Api(timeout=api_timeout)
     sweep = api.sweep(sweep_path)
@@ -820,6 +871,7 @@ def validate_sweep_cost_model(
                 group_id=group_id,
                 proposal_cluster_id=proposal_cluster_id,
                 max_rounds=max_rounds,
+                prune_correction=prune_correction,
             )
         except Exception as exc:  # pragma: no cover - runtime/network specific
             run_path = "/".join(run.path) if hasattr(run, "path") else run.id
@@ -931,11 +983,11 @@ def build_consolidation_timing_rows(validation_result: SweepValidationResult) ->
             mean_bias_rounds = timing_metrics.get("mean_bias_rounds")
 
             if _is_finite_number(mae_rounds):
-                run_mae_values.append(float(mae_rounds))
+                run_mae_values.append(float(cast(float, mae_rounds)))
             if _is_finite_number(rmse_rounds):
-                run_rmse_values.append(float(rmse_rounds))
+                run_rmse_values.append(float(cast(float, rmse_rounds)))
             if _is_finite_number(mean_bias_rounds):
-                run_bias_values.append(float(mean_bias_rounds))
+                run_bias_values.append(float(cast(float, mean_bias_rounds)))
 
         if len(collected_errors) > 0:
             errors_array = np.array(collected_errors, dtype=float)
@@ -976,3 +1028,576 @@ def build_consolidation_timing_rows(validation_result: SweepValidationResult) ->
     rows.extend(_rows_for_model("global_probability", "timing_metrics_global"))
     rows.extend(_rows_for_model("step_probability", "timing_metrics_step"))
     return rows
+
+
+def _safe_group_average(values: Sequence[Optional[float]]) -> Optional[float]:
+    finite_values = [float(cast(float, value)) for value in values if _is_finite_number(value)]
+    if not finite_values:
+        return None
+    return float(np.mean(np.array(finite_values, dtype=float)))
+
+
+def _average_step_probabilities(results: Sequence[RunValidationResult], gamma: int) -> List[float]:
+    step_values: List[List[float]] = [[] for _ in range(gamma)]
+    for result in results:
+        if len(result.step_probabilities) != gamma:
+            continue
+        for idx in range(gamma):
+            step_value = result.step_probabilities[idx]
+            if _is_finite_number(step_value):
+                step_values[idx].append(float(step_value))
+
+    averaged: List[float] = []
+    for idx in range(gamma):
+        if len(step_values[idx]) == 0:
+            return []
+        averaged.append(float(np.mean(np.array(step_values[idx], dtype=float))))
+    return averaged
+
+
+def _group_evaluated_results_by_total_clients(
+    results: Sequence[RunValidationResult],
+) -> Dict[int, List[RunValidationResult]]:
+    grouped: Dict[int, List[RunValidationResult]] = defaultdict(list)
+    for result in results:
+        if result.status != "evaluated":
+            continue
+        if result.total_clients is None:
+            continue
+        grouped[int(result.total_clients)].append(result)
+    return dict(grouped)
+
+
+def _align_group_curves(
+    rounds_list: Sequence[Sequence[int]],
+    curves_list: Sequence[Sequence[float]],
+    max_rounds: Optional[int] = None,
+) -> Tuple[List[int], np.ndarray, Optional[str]]:
+    if len(rounds_list) == 0 or len(curves_list) == 0:
+        return [], np.zeros((0, 0), dtype=float), "no series available"
+
+    horizon = min(len(rounds) for rounds in rounds_list)
+    horizon = min(horizon, min(len(curve) for curve in curves_list))
+    if max_rounds is not None:
+        horizon = min(horizon, int(max_rounds))
+
+    if horizon <= 0:
+        return [], np.zeros((0, 0), dtype=float), "empty aligned horizon"
+
+    aligned_rounds = [int(round_value) for round_value in rounds_list[0][:horizon]]
+    aligned_curves: List[np.ndarray] = []
+    for curve in curves_list:
+        aligned = np.array(curve[:horizon], dtype=float)
+        if aligned.size != horizon:
+            return [], np.zeros((0, 0), dtype=float), "curve length mismatch during alignment"
+        aligned_curves.append(aligned)
+
+    stacked = np.stack(aligned_curves, axis=0)
+    return aligned_rounds, stacked, None
+
+
+def _average_metric_dicts(metrics_list: Sequence[Dict[str, float]]) -> Dict[str, float]:
+    if len(metrics_list) == 0:
+        return _compute_core_metrics(np.array([], dtype=float), np.array([], dtype=float))
+
+    keys = list(_compute_core_metrics(np.array([1.0]), np.array([1.0])).keys())
+    averaged: Dict[str, float] = {}
+    for key in keys:
+        values = [float(metric[key]) for metric in metrics_list if key in metric and _is_finite_number(metric[key])]
+        averaged[key] = float(np.mean(np.array(values, dtype=float))) if len(values) > 0 else float("nan")
+    return averaged
+
+
+def _compute_group_metrics(
+    actual_curves: np.ndarray,
+    predicted_curves: np.ndarray,
+    segment_indices_per_run: Sequence[np.ndarray],
+    segment_count: int,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    if actual_curves.shape != predicted_curves.shape:
+        raise ValueError("actual and predicted curves must have the same shape")
+
+    run_count = actual_curves.shape[0]
+    if run_count == 0:
+        empty = _compute_metrics(np.array([], dtype=float), np.array([], dtype=float))
+        return empty, empty
+
+    per_run_metrics: List[Dict[str, Any]] = []
+    for run_idx in range(run_count):
+        seg_indices = segment_indices_per_run[run_idx]
+        per_run_metrics.append(
+            _compute_metrics(
+                actual_curves[run_idx],
+                predicted_curves[run_idx],
+                segment_indices=seg_indices,
+                segment_count=segment_count,
+            )
+        )
+
+    macro_core = _average_metric_dicts(
+        [{k: v for k, v in metrics.items() if k != "segments"} for metrics in per_run_metrics]
+    )
+
+    macro_segments: Dict[str, Dict[str, float]] = {}
+    for segment_id in range(segment_count):
+        segment_key = f"segment_{segment_id}"
+        macro_segments[segment_key] = _average_metric_dicts(
+            [cast(Dict[str, float], metrics.get("segments", {}).get(segment_key, {})) for metrics in per_run_metrics]
+        )
+    macro_metrics = {**macro_core, "segments": macro_segments}
+
+    micro_core = _compute_core_metrics(
+        actual_curves.reshape(-1),
+        predicted_curves.reshape(-1),
+    )
+
+    micro_segments: Dict[str, Dict[str, float]] = {}
+    for segment_id in range(segment_count):
+        segment_actual_values: List[float] = []
+        segment_pred_values: List[float] = []
+        for run_idx in range(run_count):
+            seg_mask = segment_indices_per_run[run_idx] == segment_id
+            segment_actual_values.extend(actual_curves[run_idx][seg_mask].tolist())
+            segment_pred_values.extend(predicted_curves[run_idx][seg_mask].tolist())
+
+        if len(segment_actual_values) == 0:
+            micro_segments[f"segment_{segment_id}"] = _compute_core_metrics(
+                np.array([], dtype=float),
+                np.array([], dtype=float),
+            )
+        else:
+            micro_segments[f"segment_{segment_id}"] = _compute_core_metrics(
+                np.array(segment_actual_values, dtype=float),
+                np.array(segment_pred_values, dtype=float),
+            )
+
+    micro_metrics = {**micro_core, "segments": micro_segments}
+    return macro_metrics, micro_metrics
+
+
+def _predict_run_configuration(
+    result: RunValidationResult,
+    gamma: int,
+    rho: float,
+    prune_ratio: Optional[float],
+    global_probability: Optional[float] = None,
+    step_probabilities: Optional[Sequence[float]] = None,
+    prune_correction: Optional[str] = None,
+) -> Optional[np.ndarray]:
+    if result.total_clients is None:
+        return None
+    if result.clients_per_round is None:
+        return None
+    if result.initial_model_size_bits is None:
+        return None
+    if len(result.rounds) == 0:
+        return None
+
+    used_prune_ratio = prune_ratio if _is_finite_number(prune_ratio) else result.prune_ratio
+    if not _is_finite_number(used_prune_ratio):
+        return None
+
+    try:
+        return _predict_cumulative_cost(
+            rounds=result.rounds,
+            total_clients=int(result.total_clients),
+            clients_per_round=int(result.clients_per_round),
+            initial_model_size_bits=float(result.initial_model_size_bits),
+            prune_ratio=float(cast(float, used_prune_ratio)),
+            gamma=gamma,
+            rho=rho,
+            global_p=global_probability,
+            p_steps=step_probabilities,
+            prune_correction=prune_correction,
+        )
+    except Exception:
+        return None
+
+
+def _build_prediction_series_for_group(
+    group_results: Sequence[RunValidationResult],
+    gamma: int,
+    rho: float,
+    max_rounds: Optional[int],
+    prune_correction: Optional[str] = None,
+) -> Tuple[Dict[str, GroupPredictionSeries], Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], List[str]]:
+    warnings: List[str] = []
+
+    avg_global_probability = _safe_group_average([result.global_probability for result in group_results])
+    avg_step_probabilities = _average_step_probabilities(group_results, gamma=gamma)
+
+    config_params = {
+        "avg_global": {
+            "global": avg_global_probability,
+            "steps": None,
+        },
+        "avg_segment": {
+            "global": None,
+            "steps": avg_step_probabilities if len(avg_step_probabilities) == gamma else None,
+        },
+        "run_global": {
+            "global": "run_specific",
+            "steps": None,
+        },
+        "run_segment": {
+            "global": None,
+            "steps": "run_specific",
+        },
+    }
+
+    predictions: Dict[str, GroupPredictionSeries] = {}
+    metrics_macro: Dict[str, Dict[str, Any]] = {}
+    metrics_micro: Dict[str, Dict[str, Any]] = {}
+
+    for config_name, config in config_params.items():
+        per_run_predictions: List[np.ndarray] = []
+        per_run_actuals: List[np.ndarray] = []
+        per_run_rounds: List[List[int]] = []
+        per_run_segment_indices: List[np.ndarray] = []
+
+        for result in group_results:
+            if len(result.actual_cumulative_cost) == 0 or len(result.rounds) == 0:
+                continue
+
+            prune_ratio = result.prune_ratio
+            global_probability = result.global_probability if config["global"] == "run_specific" else config["global"]
+
+            if config["steps"] == "run_specific":
+                step_probabilities = result.step_probabilities
+            else:
+                step_probabilities = cast(Optional[Sequence[float]], config["steps"])
+
+            predicted = _predict_run_configuration(
+                result=result,
+                gamma=gamma,
+                rho=rho,
+                prune_ratio=cast(Optional[float], prune_ratio),
+                global_probability=cast(Optional[float], global_probability),
+                step_probabilities=step_probabilities,
+                prune_correction=prune_correction,
+            )
+            if predicted is None:
+                continue
+
+            per_run_predictions.append(predicted)
+            per_run_actuals.append(np.array(result.actual_cumulative_cost, dtype=float))
+            per_run_rounds.append([int(round_value) for round_value in result.rounds])
+            per_run_segment_indices.append(_build_segment_indices(result.rounds, result.drop_rounds))
+
+        if len(per_run_predictions) == 0:
+            warnings.append(f"{config_name}: unable to build predictions for any run")
+            continue
+
+        aligned_rounds, aligned_actual, align_error = _align_group_curves(
+            rounds_list=per_run_rounds,
+            curves_list=[actual.tolist() for actual in per_run_actuals],
+            max_rounds=max_rounds,
+        )
+        if align_error is not None:
+            warnings.append(f"{config_name}: {align_error}")
+            continue
+
+        _, aligned_predictions, pred_align_error = _align_group_curves(
+            rounds_list=per_run_rounds,
+            curves_list=[prediction.tolist() for prediction in per_run_predictions],
+            max_rounds=max_rounds,
+        )
+        if pred_align_error is not None:
+            warnings.append(f"{config_name}: {pred_align_error}")
+            continue
+
+        horizon = aligned_actual.shape[1]
+        aligned_segment_indices = [seg_indices[:horizon] for seg_indices in per_run_segment_indices]
+
+        mean_prediction = np.mean(aligned_predictions, axis=0)
+
+        predictions[config_name] = GroupPredictionSeries(
+            rounds=aligned_rounds,
+            mean_curve=mean_prediction.tolist(),
+            per_run_curves=[prediction.tolist() for prediction in aligned_predictions],
+        )
+
+        macro_metrics, micro_metrics = _compute_group_metrics(
+            actual_curves=aligned_actual,
+            predicted_curves=aligned_predictions,
+            segment_indices_per_run=aligned_segment_indices,
+            segment_count=gamma + 1,
+        )
+        metrics_macro[config_name] = macro_metrics
+        metrics_micro[config_name] = micro_metrics
+
+    return predictions, metrics_macro, metrics_micro, warnings
+
+
+def _build_grouped_client_result(
+    total_clients: int,
+    group_results: Sequence[RunValidationResult],
+    gamma: int,
+    rho: float,
+    max_rounds: Optional[int],
+    prune_correction: Optional[str] = None,
+) -> GroupedClientValidationResult:
+    run_paths = [result.run_path for result in group_results]
+    run_ids = [result.run_id for result in group_results]
+
+    rounds_list = [result.rounds for result in group_results if len(result.rounds) > 0]
+    empirical_curves_list = [
+        result.actual_cumulative_cost for result in group_results if len(result.actual_cumulative_cost) > 0
+    ]
+
+    aligned_rounds, aligned_empirical, align_error = _align_group_curves(
+        rounds_list=rounds_list,
+        curves_list=empirical_curves_list,
+        max_rounds=max_rounds,
+    )
+
+    warnings: List[str] = []
+    if align_error is not None:
+        warnings.append(align_error)
+        aligned_empirical = np.zeros((0, 0), dtype=float)
+        aligned_rounds = []
+
+    if aligned_empirical.size > 0:
+        empirical_mean = np.mean(aligned_empirical, axis=0)
+    else:
+        empirical_mean = np.array([], dtype=float)
+
+    predictions, metrics_macro, metrics_micro, prediction_warnings = _build_prediction_series_for_group(
+        group_results=group_results,
+        gamma=gamma,
+        rho=rho,
+        max_rounds=max_rounds,
+        prune_correction=prune_correction,
+    )
+    warnings.extend(prediction_warnings)
+
+    return GroupedClientValidationResult(
+        total_clients=int(total_clients),
+        run_count=len(group_results),
+        run_paths=run_paths,
+        run_ids=run_ids,
+        warnings=warnings,
+        rounds=aligned_rounds,
+        empirical_mean_curve=empirical_mean.tolist(),
+        average_prune_ratio=_safe_group_average([result.prune_ratio for result in group_results]),
+        average_global_probability=_safe_group_average([result.global_probability for result in group_results]),
+        average_step_probabilities=_average_step_probabilities(group_results, gamma=gamma),
+        predictions=predictions,
+        metrics_macro=metrics_macro,
+        metrics_micro=metrics_micro,
+    )
+
+
+def validate_sweep_cost_model_grouped(
+    sweep_path: str,
+    gamma: int = 3,
+    rho: float = 0.5,
+    group_id: int = 0,
+    proposal_cluster_id: Optional[int] = 0,
+    max_rounds: Optional[int] = None,
+    api_timeout: int = 120,
+    prune_correction: Optional[str] = None,
+) -> SweepGroupedValidationResult:
+    base_validation = validate_sweep_cost_model(
+        sweep_path=sweep_path,
+        gamma=gamma,
+        rho=rho,
+        group_id=group_id,
+        proposal_cluster_id=proposal_cluster_id,
+        max_rounds=max_rounds,
+        api_timeout=api_timeout,
+        prune_correction=prune_correction,
+    )
+
+    grouped_map = _group_evaluated_results_by_total_clients(base_validation.results)
+    grouped_results: List[GroupedClientValidationResult] = []
+    for total_clients in sorted(grouped_map):
+        grouped_results.append(
+            _build_grouped_client_result(
+                total_clients=total_clients,
+                group_results=grouped_map[total_clients],
+                gamma=gamma,
+                rho=rho,
+                max_rounds=max_rounds,
+                prune_correction=prune_correction,
+            )
+        )
+
+    return SweepGroupedValidationResult(
+        sweep_path=sweep_path,
+        gamma=gamma,
+        rho=rho,
+        group_id=group_id,
+        proposal_cluster_id=proposal_cluster_id,
+        max_rounds=max_rounds,
+        base_validation=base_validation,
+        grouped_results=grouped_results,
+    )
+
+
+def build_grouped_summary_rows(grouped_validation: SweepGroupedValidationResult) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+
+    for grouped_result in grouped_validation.grouped_results:
+        for aggregation, metrics_by_config in (
+            ("macro", grouped_result.metrics_macro),
+            ("micro", grouped_result.metrics_micro),
+        ):
+            for config_name, metrics in metrics_by_config.items():
+                row = {
+                    "total_clients": grouped_result.total_clients,
+                    "run_count": grouped_result.run_count,
+                    "aggregation": aggregation,
+                    "configuration": config_name,
+                    "avg_prune_ratio": grouped_result.average_prune_ratio,
+                    "avg_global_probability": grouped_result.average_global_probability,
+                    "avg_step_probabilities": grouped_result.average_step_probabilities,
+                    "mae": metrics.get("mae"),
+                    "mse": metrics.get("mse"),
+                    "rmse": metrics.get("rmse"),
+                    "relative_rmse": metrics.get("relative_rmse"),
+                    "mape_percent": metrics.get("mape_percent"),
+                    "smape_percent": metrics.get("smape_percent"),
+                    "r2": metrics.get("r2"),
+                    "mean_bias": metrics.get("mean_bias"),
+                    "mean_bias_percent": metrics.get("mean_bias_percent"),
+                    "relative_final_error": metrics.get("relative_final_error"),
+                    "final_bias_percent": metrics.get("final_bias_percent"),
+                    "segments": metrics.get("segments"),
+                    "warnings": " | ".join(grouped_result.warnings),
+                }
+                rows.append(row)
+
+    rows.sort(key=lambda item: (int(item["total_clients"]), str(item["aggregation"]), str(item["configuration"])))
+    return rows
+
+
+def build_grouped_consolidation_timing_rows(
+    grouped_validation: SweepGroupedValidationResult,
+) -> List[Dict[str, Any]]:
+    grouped_rows: List[Dict[str, Any]] = []
+    grouped_map = _group_evaluated_results_by_total_clients(grouped_validation.base_validation.results)
+
+    for total_clients in sorted(grouped_map):
+        group_results = grouped_map[total_clients]
+        average_global_probability = _safe_group_average(
+            [result.global_probability for result in group_results],
+        )
+        average_step_probabilities = _average_step_probabilities(
+            group_results,
+            grouped_validation.gamma,
+        )
+
+        model_specs = [
+            ("avg_global", None),
+            ("run_global", "timing_metrics_global"),
+            ("avg_segment", None),
+            ("run_segment", "timing_metrics_step"),
+        ]
+
+        for model_name, timing_attr in model_specs:
+            collected_errors: List[float] = []
+            run_mae_values: List[float] = []
+            run_rmse_values: List[float] = []
+            run_bias_values: List[float] = []
+            runs_with_events = 0
+            total_events = 0
+
+            for result in group_results:
+                if timing_attr is not None:
+                    timing_metrics = getattr(result, timing_attr, {}) or {}
+                else:
+                    if model_name == "avg_global":
+                        if not _is_finite_number(average_global_probability):
+                            continue
+                        predicted_drop_rounds = _predict_consolidation_rounds(
+                            rounds=result.rounds,
+                            gamma=grouped_validation.gamma,
+                            total_clients=int(cast(int, result.total_clients)),
+                            clients_per_round=int(cast(int, result.clients_per_round)),
+                            rho=grouped_validation.rho,
+                            global_p=float(cast(float, average_global_probability)),
+                        )
+                    else:
+                        if len(average_step_probabilities) != grouped_validation.gamma:
+                            continue
+                        if any(not _is_finite_number(p_value) for p_value in average_step_probabilities):
+                            continue
+                        predicted_drop_rounds = _predict_consolidation_rounds(
+                            rounds=result.rounds,
+                            gamma=grouped_validation.gamma,
+                            total_clients=int(cast(int, result.total_clients)),
+                            clients_per_round=int(cast(int, result.clients_per_round)),
+                            rho=grouped_validation.rho,
+                            p_steps=average_step_probabilities,
+                        )
+
+                    timing_metrics = _compute_timing_metrics(
+                        actual_drop_rounds=result.drop_rounds,
+                        predicted_drop_rounds=predicted_drop_rounds,
+                    )
+
+                events_count = int(timing_metrics.get("events_count", 0) or 0)
+                if events_count <= 0:
+                    continue
+
+                errors = timing_metrics.get("errors", []) or []
+                errors_float = [float(error) for error in errors if _is_finite_number(error)]
+                if len(errors_float) == 0:
+                    continue
+
+                collected_errors.extend(errors_float)
+                total_events += len(errors_float)
+                runs_with_events += 1
+
+                mae_rounds = timing_metrics.get("mae_rounds")
+                rmse_rounds = timing_metrics.get("rmse_rounds")
+                mean_bias_rounds = timing_metrics.get("mean_bias_rounds")
+
+                if _is_finite_number(mae_rounds):
+                    run_mae_values.append(float(cast(float, mae_rounds)))
+                if _is_finite_number(rmse_rounds):
+                    run_rmse_values.append(float(cast(float, rmse_rounds)))
+                if _is_finite_number(mean_bias_rounds):
+                    run_bias_values.append(float(cast(float, mean_bias_rounds)))
+
+            if len(collected_errors) > 0:
+                errors_array = np.array(collected_errors, dtype=float)
+                micro_mae = float(np.mean(np.abs(errors_array)))
+                micro_rmse = float(np.sqrt(np.mean(np.square(errors_array))))
+                micro_bias = float(np.mean(errors_array))
+            else:
+                micro_mae = float("nan")
+                micro_rmse = float("nan")
+                micro_bias = float("nan")
+
+            macro_mae = float(np.mean(run_mae_values)) if len(run_mae_values) > 0 else float("nan")
+            macro_rmse = float(np.mean(run_rmse_values)) if len(run_rmse_values) > 0 else float("nan")
+            macro_bias = float(np.mean(run_bias_values)) if len(run_bias_values) > 0 else float("nan")
+
+            grouped_rows.extend(
+                [
+                    {
+                        "total_clients": int(total_clients),
+                        "model": model_name,
+                        "aggregation": "micro",
+                        "mae_rounds": micro_mae,
+                        "rmse_rounds": micro_rmse,
+                        "mean_bias_rounds": micro_bias,
+                        "runs_count": runs_with_events,
+                        "events_count": total_events,
+                    },
+                    {
+                        "total_clients": int(total_clients),
+                        "model": model_name,
+                        "aggregation": "macro",
+                        "mae_rounds": macro_mae,
+                        "rmse_rounds": macro_rmse,
+                        "mean_bias_rounds": macro_bias,
+                        "runs_count": runs_with_events,
+                        "events_count": total_events,
+                    },
+                ]
+            )
+
+    return grouped_rows
