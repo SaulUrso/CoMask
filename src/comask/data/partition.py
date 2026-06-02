@@ -23,6 +23,39 @@ def partition(dataset, partition_method, method_name=None, client_num=None, feat
         raise ValueError(f"{partition_method} is not a valid partition method.")
 
 
+def _dirichlet_assign(
+    y: np.ndarray,
+    num_clients: int,
+    class_proportions: List[np.ndarray],
+    self_balancing: bool,
+    rng: np.random.Generator,
+) -> List[List[int]]:
+    """Assign sample indices to clients for one fixed set of per-class proportions.
+
+    Because the proportions are sampled independently of the number of samples,
+    reusing the same ``class_proportions`` across two datasets (e.g. a train and a
+    test split) produces aligned per-client class distributions.
+    """
+    N = y.shape[0]
+    idx_batch: List[List[int]] = [[] for _ in range(num_clients)]
+    for k, proportions in enumerate(class_proportions):
+        idx_k = np.where(y == k)[0]
+        rng.shuffle(idx_k)
+        props = proportions
+        # Balancing: stop assigning to a client once it already holds more than the
+        # average number of samples per client.
+        if self_balancing:
+            props = np.array([p * (len(idx_j) < N / num_clients) for p, idx_j in zip(props, idx_batch)])
+        total = props.sum()
+        if total <= 0:  # every client already above the average for this class
+            props = proportions
+            total = props.sum()
+        props = props / total
+        sample_prop = (np.cumsum(props) * len(idx_k)).astype(int)[:-1]
+        idx_batch = [idx_j + idx.tolist() for idx_j, idx in zip(idx_batch, np.split(idx_k, sample_prop))]
+    return idx_batch
+
+
 def dirichlet_partition(
     y: np.ndarray,
     num_clients: int,
@@ -30,77 +63,132 @@ def dirichlet_partition(
     seed: int = 0,
     min_require_size: int = 10,
     self_balancing: bool = True,
+    max_trials: int = 10,
 ) -> Dict[int, List[int]]:
-    """Partitions dataset indices among clients using a Dirichlet distribution to
-    simulate non-IID data splits.
+    """Partition dataset indices among clients using a Dirichlet distribution.
+
+    The whole Dirichlet draw is resampled until every client holds at least
+    ``min_require_size`` samples. If that cannot be achieved within ``max_trials``
+    attempts a ``ValueError`` is raised (the standard NIID-bench / Flower behaviour).
+    No samples are redistributed, so the sampled heterogeneity is preserved.
 
     Args:
-        y (np.ndarray): array containing the classes of the samples of the dataset
-        num_clients (int): number of partitions to create
-        data_split_alpha (float, optional): alpha od dirilichet distribution. Defaults
-        to 0.5.
-        seed (int, optional): Seed used for the random number generator. Defaults to 0.
-        min_require_size (int, optional): Minimum amount of samples present in each
-        client. Defaults to 10.
-        self_balancing (bool, optional): Whether to balance the partitioning of samples
-        among the clients. Defaults to True.
+        y (np.ndarray): class label of every sample.
+        num_clients (int): number of partitions to create.
+        data_split_alpha (float): Dirichlet concentration parameter.
+        seed (int): RNG seed.
+        min_require_size (int): minimum number of samples each client must hold.
+        self_balancing (bool): whether to cap clients at the average sample count.
+        max_trials (int): maximum number of resampling attempts before giving up.
 
     Raises:
-        ValueError: When trials done for creating the partitioning never manage to
-        respect the minimum number of samples per client. Trieas at most 10 times
+        ValueError: if ``min_require_size`` cannot be met within ``max_trials``.
 
     Returns:
-        Dict[int, List[int]]: A dictionary mapping each client index (int) to a list of
-        dataset sample indices (List[int]) assigned to that client.
+        Dict[int, List[int]]: client index -> assigned sample indices.
     """
-    min_size: int = 0
-    K: int = len(np.unique(y))
-
-    N: int = y.shape[0]
+    K = len(np.unique(y))
     rng = np.random.default_rng(seed)
-    client_data_indices: Dict[int, List[int]] = {}
     idx_batch: List[List[int]] = [[] for _ in range(num_clients)]
-    trial: int = 0
+    min_size = 0
+    trial = 0
     while min_size < min_require_size:
-        idx_batch = [[] for _ in range(num_clients)]
-
-        # first sample proportions in order to make it independent of sample amount for random number
-        class_proportions = []
-        for k in range(K):
-            proportions: np.ndarray[Any, np.dtype[np.float64]] = rng.dirichlet(
-                np.repeat(data_split_alpha, num_clients)
-            )
-            class_proportions.append(proportions)
-
-        for k in range(K):
-            idx_k = np.where(y == k)[0]
-            proportions: np.ndarray[Any, np.dtype[np.float64]] = class_proportions[k]
-            rng.shuffle(idx_k)
-
-            ## Balance
-            if self_balancing:
-                proportions = np.array([p * (len(idx_j) < N / num_clients) for p, idx_j in zip(proportions, idx_batch)])
-
-            proportions = proportions / proportions.sum()
-
-            sample_prop: np.ndarray[tuple, np.dtype[np.int_]] = (np.cumsum(proportions) * len(idx_k)).astype(int)[:-1]
-            idx_batch = [idx_j + idx.tolist() for idx_j, idx in zip(idx_batch, np.split(idx_k, sample_prop))]
-            min_size = min([len(idx_j) for idx_j in idx_batch])
-
+        class_proportions = [rng.dirichlet(np.repeat(data_split_alpha, num_clients)) for _ in range(K)]
+        idx_batch = _dirichlet_assign(y, num_clients, class_proportions, self_balancing, rng)
+        min_size = min(len(idx_j) for idx_j in idx_batch)
         trial += 1
+        if min_size < min_require_size and trial >= max_trials:
+            raise ValueError(
+                f"min_require_size ({min_require_size}) not met after {trial} attempts "
+                f"(best min={min_size}). Reduce num_clients, lower min_require_size, "
+                f"or increase data_split_alpha."
+            )
 
-        if trial >= 10:
-            raise ValueError(f"Max number of attempts {trial} reached, try a different alpha.")
-
-        # NOTE: hotfix to ensure test and train have same distribution.
-        if min_size < min_require_size:
-            raise ValueError(f"Min size of {min_size} < {min_require_size} , try a different alpha.")
-
+    client_data_indices: Dict[int, List[int]] = {}
     for j in range(num_clients):
         rng.shuffle(idx_batch[j])
         client_data_indices[j] = idx_batch[j]
-
     return client_data_indices
+
+
+def dirichlet_partition_train_test(
+    y_train: np.ndarray,
+    y_test: np.ndarray,
+    num_clients: int,
+    data_split_alpha: float = 0.5,
+    seed: int = 0,
+    min_require_size: int = 10,
+    self_balancing: bool = True,
+    max_trials: int = 10,
+) -> Tuple[Dict[int, List[int]], Dict[int, List[int]]]:
+    """Dirichlet-partition train and test while keeping each client's class
+    distribution aligned across the two splits.
+
+    Both splits use the same per-class proportions on every attempt. The proportions
+    are drawn from a dedicated RNG that is never advanced by the per-split index
+    shuffling, so client ``j``'s train and test data follow the same class
+    distribution. The draw is resampled until *both* splits satisfy
+    ``min_require_size`` (or ``max_trials`` is exhausted).
+
+    Raises:
+        ValueError: if ``min_require_size`` cannot be met for both splits within
+            ``max_trials``.
+    """
+    K = len(np.unique(y_train))
+    prop_rng = np.random.default_rng(seed)
+    train_batch: List[List[int]] = [[] for _ in range(num_clients)]
+    test_batch: List[List[int]] = [[] for _ in range(num_clients)]
+    train_rng = test_rng = np.random.default_rng(seed)
+    train_min = test_min = 0
+    trial = 0
+    while min(train_min, test_min) < min_require_size:
+        class_proportions = [prop_rng.dirichlet(np.repeat(data_split_alpha, num_clients)) for _ in range(K)]
+        # Re-seeded each attempt so the index shuffling stays deterministic and never
+        # perturbs the shared proportion stream above.
+        train_rng = np.random.default_rng(seed * 2 + 1)
+        test_rng = np.random.default_rng(seed * 2 + 2)
+        train_batch = _dirichlet_assign(y_train, num_clients, class_proportions, self_balancing, train_rng)
+        test_batch = _dirichlet_assign(y_test, num_clients, class_proportions, self_balancing, test_rng)
+        train_min = min(len(b) for b in train_batch)
+        test_min = min(len(b) for b in test_batch)
+        trial += 1
+        if min(train_min, test_min) < min_require_size and trial >= max_trials:
+            raise ValueError(
+                f"min_require_size ({min_require_size}) not met after {trial} attempts "
+                f"(best train_min={train_min}, test_min={test_min}). Reduce num_clients, "
+                f"lower min_require_size, or increase data_split_alpha."
+            )
+
+    train_idx: Dict[int, List[int]] = {}
+    test_idx: Dict[int, List[int]] = {}
+    for j in range(num_clients):
+        train_rng.shuffle(train_batch[j])
+        test_rng.shuffle(test_batch[j])
+        train_idx[j] = train_batch[j]
+        test_idx[j] = test_batch[j]
+    return train_idx, test_idx
+
+
+def partition_dirichlet_aligned(
+    train_dataset: Dataset,
+    test_dataset: Dataset,
+    num_clients: int,
+    label_column: str = "label",
+    **kwargs,
+) -> Tuple[List[Dataset], List[Dataset]]:
+    """Build aligned Dirichlet train/test partitions as lists of HF datasets.
+
+    Each client's train and test splits share the same per-class proportions (see
+    :func:`dirichlet_partition_train_test`).
+    """
+    if label_column not in train_dataset.column_names:
+        raise ValueError("Cannot extract labels from train dataset")
+    y_train = np.array(train_dataset[label_column])
+    y_test = np.array(test_dataset[label_column])
+    train_idx, test_idx = dirichlet_partition_train_test(y_train, y_test, num_clients, **kwargs)
+    train_parts = [train_dataset.select(train_idx[j]) for j in range(num_clients)]
+    test_parts = [test_dataset.select(test_idx[j]) for j in range(num_clients)]
+    return train_parts, test_parts
 
 
 def uniform_partition(

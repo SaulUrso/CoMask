@@ -129,34 +129,47 @@ class FedMLAdapter:
                 dataset_size = len(client_train_dataset)
                 val_size = int(dataset_size * validation_split)
                 train_size = dataset_size - val_size
-                
-                # Create train and validation subsets
-                indices = list(range(dataset_size))
-                train_indices = indices[:train_size]
-                val_indices = indices[train_size:]
-                
-         
-                client_train_split = client_train_dataset.select(train_indices)
-                client_val_split = client_train_dataset.select(val_indices)
-                
-                client_train_split = client_train_split.with_transform(transform_fn)
-                client_val_split = client_val_split.with_transform(transform_fn)
-                
-                train_data_local_num_dict[client_id] = len(client_train_split)
-                
-                train_data_local_dict[client_id] = DataLoader(
-                    client_train_split,  # type: ignore
-                    batch_size=batch_size,
-                    shuffle=True,
-                    collate_fn=collate_fn,
-                )
-                
-                val_data_local_dict[client_id] = DataLoader(
-                    client_val_split,  # type: ignore
-                    batch_size=batch_size,
-                    shuffle=False,
-                    collate_fn=collate_fn,
-                )
+
+                if val_size == 0:
+                    # Too few local samples to carve out a validation set: train on all
+                    # of them and mark this client as having no validation data. It will
+                    # abstain from mask proposals downstream.
+                    client_train_split = client_train_dataset.with_transform(transform_fn)
+                    train_data_local_num_dict[client_id] = len(client_train_split)
+                    train_data_local_dict[client_id] = DataLoader(
+                        client_train_split,  # type: ignore
+                        batch_size=batch_size,
+                        shuffle=True,
+                        collate_fn=collate_fn,
+                    )
+                    val_data_local_dict[client_id] = None
+                else:
+                    # Create train and validation subsets
+                    indices = list(range(dataset_size))
+                    train_indices = indices[:train_size]
+                    val_indices = indices[train_size:]
+
+                    client_train_split = client_train_dataset.select(train_indices)
+                    client_val_split = client_train_dataset.select(val_indices)
+
+                    client_train_split = client_train_split.with_transform(transform_fn)
+                    client_val_split = client_val_split.with_transform(transform_fn)
+
+                    train_data_local_num_dict[client_id] = len(client_train_split)
+
+                    train_data_local_dict[client_id] = DataLoader(
+                        client_train_split,  # type: ignore
+                        batch_size=batch_size,
+                        shuffle=True,
+                        collate_fn=collate_fn,
+                    )
+
+                    val_data_local_dict[client_id] = DataLoader(
+                        client_val_split,  # type: ignore
+                        batch_size=batch_size,
+                        shuffle=False,
+                        collate_fn=collate_fn,
+                    )
             else:
                 # No validation split - use entire dataset for training
                 client_train_dataset = client_train_dataset.with_transform(transform_fn)
