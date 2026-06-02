@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from comask.clustering.clustering import perform_clustering_svd
 from comask.data.adapters import FedMLAdapter
 from comask.data.dataload import collate_fn, load_my_data
-from comask.data.partition import create_natural_test_sets, partition
+from comask.data.partition import create_natural_test_sets, partition, partition_dirichlet_aligned
 from comask.models.cnn import HARBox_CNN
 from comask.models.mobilenet import MobileNet
 from comask.models.resnet_cifar import resnet18_cifar
@@ -72,26 +72,37 @@ if __name__ == "__main__":
             "seed": seed,
         }
 
-    train_partitions = partition(
-        train_dataset,
-        args.partition_method,
-        method_name=method_name,
-        client_num=num_clients,
-        feature_col=feature_col,
-        **partition_kwargs,
-    )
-
-    if args.partition_method == "natural" and feature_col is not None:
-        test_partitions = create_natural_test_sets(train_partitions, test_dataset, feature_column=feature_col)
-    else:
-        test_partitions = partition(
+    if args.partition_method == "label" and method_name == "dirichlet":
+        # Dirichlet train/test partitions share per-class proportions so each client's
+        # train and test splits follow the same class distribution.
+        train_partitions, test_partitions = partition_dirichlet_aligned(
+            train_dataset,
             test_dataset,
+            num_clients,
+            label_column="label",
+            **partition_kwargs,
+        )
+    else:
+        train_partitions = partition(
+            train_dataset,
             args.partition_method,
             method_name=method_name,
             client_num=num_clients,
             feature_col=feature_col,
             **partition_kwargs,
         )
+
+        if args.partition_method == "natural" and feature_col is not None:
+            test_partitions = create_natural_test_sets(train_partitions, test_dataset, feature_column=feature_col)
+        else:
+            test_partitions = partition(
+                test_dataset,
+                args.partition_method,
+                method_name=method_name,
+                client_num=num_clients,
+                feature_col=feature_col,
+                **partition_kwargs,
+            )
 
     args.client_num_in_total = len(train_partitions)
 

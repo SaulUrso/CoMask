@@ -353,7 +353,11 @@ class PruneClusterAPI(ClusterAPI):
 
         val_loader = self.val_data_local_dict[client_idx]
 
-        assert val_loader is not None, f"Client {client_idx} has val_loader {val_loader}"
+        # Clients with too few local samples to split off a validation set cannot
+        # evaluate the model, so they abstain from proposing a mask.
+        if val_loader is None:
+            logging.info(f"Client {client_idx} has no validation data; skipping proposal")
+            return None
 
         # Build a temporary trainer for evaluation using the cluster model structure
         self.model_trainer.model = self.cluster_models[group_idx]
@@ -361,7 +365,9 @@ class PruneClusterAPI(ClusterAPI):
 
         val_metrics = self.model_trainer.test(val_loader, self.device, self.args)
         test_total = val_metrics["test_total"]
-        assert test_total > 0
+        if test_total == 0:
+            logging.info(f"Client {client_idx} has an empty validation set; skipping proposal")
+            return None
 
         val_acc = val_metrics["test_correct"] / test_total
         threshold = self.args.accuracy_threshold
@@ -416,8 +422,8 @@ class PruneClusterAPI(ClusterAPI):
         # Check if test_jaccard is enabled and we have enough proposals
         test_jaccard = getattr(self.args, "test_jaccard", False)
 
-        # Validate consolidation_param for vote_mask
-        # If using absolute units, check if it's feasible; otherwise fall back to percentage
+        # Validate consolidation_param for vote_mask.
+        # When using absolute units it must leave at least one filter per layer.
         voting_param = consolidation_param
         if isinstance(consolidation_param, int) and len(mask_proposals) > 0:
             # Calculate total units available in the masks
@@ -429,11 +435,9 @@ class PruneClusterAPI(ClusterAPI):
             # Check if absolute number is feasible
             max_removable = total_units - (min_filters * num_layers)
             if consolidation_param >= max_removable:
-                # Fall back to percentage
-                voting_param = self.args.consolidation_percentage
-                logging.warning(
-                    f"consolidation_param={consolidation_param} is too large (max_removable={max_removable}). "
-                    f"Falling back to percentage={voting_param}"
+                raise ValueError(
+                    f"consolidation_param={consolidation_param} is too large "
+                    f"(max_removable={max_removable}, total_units={total_units}, num_layers={num_layers})."
                 )
 
         if test_jaccard and len(mask_proposals) >= 10:  # Need at least 10 proposals for 20% groups
@@ -584,7 +588,7 @@ class PruneClusterAPI(ClusterAPI):
         self.cluster_models[group_idx] = pruned_cluster_model
 
         if self.cluster_first_prune_units[group_idx] is None:
-            units_pruned = sum(mask_info["pruned_filters"] for mask_info in voted_mask.values())
+            units_pruned = sum(mask_info["original_filters"] - mask_info["pruned_filters"] for mask_info in voted_mask.values())
             self.cluster_first_prune_units[group_idx] = units_pruned
             logging.info(f"Recorded {units_pruned} units pruned for cluster {group_idx} first voted mask pruning ")
 
