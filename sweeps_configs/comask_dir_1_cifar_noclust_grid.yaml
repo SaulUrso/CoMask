@@ -1,0 +1,80 @@
+program: scripts/cluster_prune_script.py
+method: grid
+name: comask_noclust_dir1
+project: comask_noclust_grid
+entity: s-urso2
+metric:
+  name: Server/FullTest/Acc
+  goal: maximize
+
+parameters:
+  train_args:
+    parameters:
+      single_cluster:
+        values: [true]
+
+      pruning:
+        values: ["proposal"]
+
+      # --- grid axes (CoMask-specific knobs) ---
+      ssl_coefficient:
+        values: [2e-3, 4e-3, 7e-3, 1e-2]
+
+      accuracy_threshold:
+        values: [0.2]
+
+      # --- fixed across all experiments ---
+      learning_rate:
+        values: [0.1]
+
+      weight_decay:
+        values: [0.0001]
+
+      comm_round:
+        values: [300]
+
+      consensus_percentage:
+        values: [0.2]
+
+      prune_counter:
+        values: [3]
+
+      prune_percent:
+        values: [0.1]
+
+      consolidation_percentage:
+        values: [0.1]
+
+      client_num_in_total:
+        values: [100]
+
+  validation_args:
+    parameters:
+      frequency_of_the_test:
+        values: [100]
+
+  data_args:
+    parameters:
+      partition_method:
+        values: ["label"]
+
+      method_name:
+        values: ["dirichlet"]
+
+      data_split_alpha:
+        values: [1]
+
+      min_require_size:
+        values: [1]
+
+
+command:
+  - uv
+  - run
+  - --no-sync
+  - --env-file
+  - .env
+  - --
+  - ${program}
+  - --cf
+  - configs/cifar_config.yaml
