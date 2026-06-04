@@ -1,6 +1,6 @@
 program: scripts/cluster_prune_script.py
 method: grid
-name: comask_8clust_dir0.5
+name: comask_2clust_dir0.5
 project: comask_clust_grid
 entity: s-urso2
 metric:
@@ -11,7 +11,7 @@ parameters:
   train_args:
     parameters:
       n_clusters:
-        values: [8]
+        values: [2]
 
       group_method:
         values: ["clusters"]
@@ -65,7 +65,7 @@ parameters:
         values: ["dirichlet"]
 
       data_split_alpha:
-        values: [0.5]
+        values: [0.1]
 
       min_require_size:
         values: [1]

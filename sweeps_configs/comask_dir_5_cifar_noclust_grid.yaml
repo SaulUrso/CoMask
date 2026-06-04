@@ -18,10 +18,10 @@ parameters:
 
       # --- grid axes (CoMask-specific knobs) ---
       ssl_coefficient:
-        values: [2e-3, 4e-3, 7e-3, 1e-2]
+        values: [1e-2]
 
       accuracy_threshold:
-        values: [0.2]
+        values: [0.1,0.15, 0.25,0.3]
 
       # --- fixed across all experiments ---
       learning_rate:
