@@ -27,6 +27,9 @@ train_args:
   n_basis: 5
   preference: -190 # -90,-190 has 4
   group_method: clusters
+# PACFL params (only used by pacfl_script.py)
+  beta: 30          # distance-threshold cut, degrees [0,90]; or set n_clusters instead
+  linkage_method: average
 # pruning params
   pruning: "proposal" # "random"
   ssl_coefficient: 0

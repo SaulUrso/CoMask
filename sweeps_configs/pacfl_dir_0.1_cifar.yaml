@@ -1,0 +1,74 @@
+program: scripts/pacfl_script.py
+method: grid
+name: pacfl_dir0.1_cifar
+project: pacfl_baseline
+entity: s-urso2
+metric:
+  name: Server/FullTest/Acc
+  goal: maximize
+
+parameters:
+  train_args:
+    parameters:
+      group_method:
+        values: ["clusters"]
+
+      linkage_method:
+        values: ["average"]
+
+      # --- primary PACFL axis: distance-threshold cut (degrees, min principal angle in [0,90]) ---
+      # Initial guesses; calibrate from Clustering/NumClusters after the first run.
+      beta:
+        values: [10, 20, 30, 40, 50, 60]
+
+      n_basis:
+        values: [5]
+
+      learning_rate:
+        values: [0.1]
+
+      weight_decay:
+        values: [0.0001]
+
+      epochs:
+        values: [5]
+
+      comm_round:
+        values: [250]
+
+      client_num_in_total:
+        values: [100]
+
+      client_num_per_round:
+        values: [0.1]
+
+  validation_args:
+    parameters:
+      frequency_of_the_test:
+        values: [50]
+
+  data_args:
+    parameters:
+      partition_method:
+        values: ["label"]
+
+      method_name:
+        values: ["dirichlet"]
+
+      data_split_alpha:
+        values: [0.1]
+
+      min_require_size:
+        values: [1]
+
+
+command:
+  - uv
+  - run
+  - --no-sync
+  - --env-file
+  - .env
+  - --
+  - ${program}
+  - --cf
+  - configs/cifar_config.yaml

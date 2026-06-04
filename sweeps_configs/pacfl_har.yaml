@@ -1,0 +1,57 @@
+program: scripts/pacfl_script.py
+method: grid
+name: pacfl_har
+project: pacfl_baseline
+entity: s-urso2
+metric:
+  name: Server/FullTest/Acc
+  goal: maximize
+
+parameters:
+  train_args:
+    parameters:
+      group_method:
+        values: ["clusters"]
+
+      linkage_method:
+        values: ["average"]
+
+      # --- primary PACFL axis: distance-threshold cut (degrees, min principal angle in [0,90]) ---
+      # Initial guesses; calibrate from Clustering/NumClusters after the first run.
+      beta:
+        values: [10, 20, 30, 40, 50, 60]
+
+      n_basis:
+        values: [5]
+
+      learning_rate:
+        values: [0.1]
+
+      weight_decay:
+        values: [0]
+
+      epochs:
+        values: [5]
+
+      comm_round:
+        values: [250]
+
+      client_num_per_round:
+        values: [10]
+
+  validation_args:
+    parameters:
+      frequency_of_the_test:
+        values: [50]
+
+
+command:
+  - uv
+  - run
+  - --no-sync
+  - --env-file
+  - .env
+  - --
+  - ${program}
+  - --cf
+  - configs/har_config.yaml

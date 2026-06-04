@@ -11,16 +11,23 @@ from sklearn.cluster import AffinityPropagation, AgglomerativeClustering
 from tqdm import tqdm
 
 
-def perform_clustering_svd(client_data_list, args, output_path="/disc/homes/urso/adjacency_matrix.npz"):
+def _compute_client_signatures(client_data_list, K):
+    """
+    Compute each client's PACFL/CoMask SVD signature.
+
+    For every client, the local samples are grouped by label; per label we take the
+    truncated SVD of the (n_features, n_samples) class matrix and keep the top-``K`` left
+    singular vectors (column-normalized). The per-label bases are horizontally stacked into a
+    single signature matrix per client.
+
+    Args:
+        client_data_list: iterable of per-client (transform-applied) datasets.
+        K (int): number of left singular vectors to keep per class (``args.n_basis``).
+
+    Returns:
+        list[np.ndarray]: one signature matrix per client, shape (n_features, K * n_classes).
+    """
     U_clients = []
-
-    required_fields = ["n_basis", "client_num_in_total", "preference"]
-    for field in required_fields:
-        if not hasattr(args, field):
-            raise AttributeError(f"args is missing required field: '{field}'")
-
-    K = args.n_basis  # 5 by default in experiments
-
 
     for idx, train_ds_local in enumerate(client_data_list):  # for each client dataset
         idxs_local = np.arange(len(train_ds_local))
@@ -61,6 +68,19 @@ def perform_clustering_svd(client_data_list, args, output_path="/disc/homes/urso
         U_clients.append(copy.deepcopy(np.hstack(U_temp)))
         print(f"Client {idx} - Shape of U: {U_clients[-1].shape}")
 
+    return U_clients
+
+
+def perform_clustering_svd(client_data_list, args, output_path="/disc/homes/urso/adjacency_matrix.npz"):
+    required_fields = ["n_basis", "client_num_in_total", "preference"]
+    for field in required_fields:
+        if not hasattr(args, field):
+            raise AttributeError(f"args is missing required field: '{field}'")
+
+    K = args.n_basis  # 5 by default in experiments
+
+    U_clients = _compute_client_signatures(client_data_list, K)
+
     ###################################### Clustering
     sim_mat = -calculating_adjacency(range(args.client_num_in_total), U_clients)
     np.fill_diagonal(sim_mat, 0)  # Set diagonal to 0 for self-similarity
@@ -76,6 +96,77 @@ def perform_clustering_svd(client_data_list, args, output_path="/disc/homes/urso
         cluster_labels, cluster_centers = perform_clustering(sim_mat, method="affinity", preference=preference)
 
     return cluster_labels, cluster_centers, sim_mat
+
+
+def cluster_hierarchical(dist_mat, beta=None, n_clusters=None, linkage_method="average"):
+    """
+    Agglomerative hierarchical clustering on a precomputed distance matrix (PACFL).
+
+    The PACFL paper cuts the dendrogram at a distance threshold ``beta``, so the number of
+    clusters is an *output* of the cut, not an input. We also support fixing the cluster count
+    directly via ``n_clusters`` (``criterion="maxclust"``) for head-to-head comparison with the
+    CoMask sweeps. Exactly one of ``beta`` / ``n_clusters`` must be provided.
+
+    Args:
+        dist_mat (np.ndarray): (N, N) symmetric distance matrix, zero diagonal. In this repo the
+            entries are the smallest principal angle between client subspaces, in degrees [0, 90].
+        beta (float | None): distance threshold for the dendrogram cut (degrees).
+        n_clusters (int | None): fixed number of clusters (takes precedence over ``beta``).
+        linkage_method (str): scipy linkage method ('single' | 'complete' | 'average' | 'ward').
+
+    Returns:
+        np.ndarray: integer cluster label per client (length N).
+    """
+    from scipy.cluster.hierarchy import fcluster, linkage
+    from scipy.spatial.distance import squareform
+
+    condensed = squareform(dist_mat, checks=False)  # (N*(N-1)/2,) condensed distances
+    linkage_matrix = linkage(condensed, method=linkage_method)
+
+    if n_clusters is not None and int(n_clusters) > 0:
+        labels = fcluster(linkage_matrix, t=int(n_clusters), criterion="maxclust")
+        print(f"  - PACFL HC ({linkage_method} linkage): fixed n_clusters={int(n_clusters)}")
+    elif beta is not None:
+        labels = fcluster(linkage_matrix, t=float(beta), criterion="distance")
+        print(f"  - PACFL HC ({linkage_method} linkage): beta={float(beta)} -> {len(set(labels))} clusters")
+    else:
+        raise ValueError("cluster_hierarchical requires either `beta` or `n_clusters`.")
+
+    return labels
+
+
+def perform_clustering_svd_hc(client_data_list, args):
+    """
+    PACFL clustering: SVD client signatures + min-principal-angle distance matrix (Eq. 2) +
+    agglomerative hierarchical clustering cut at threshold ``beta`` (or fixed ``n_clusters``).
+
+    Reuses the same signature computation as :func:`perform_clustering_svd`; the only difference
+    is the clustering backend (hierarchical instead of AffinityPropagation) and that it operates
+    on the **positive** distance matrix (the AffinityPropagation path negates it into a similarity).
+
+    Reads from ``args``: ``n_basis`` (K), and one of ``beta`` / ``n_clusters``, plus optional
+    ``linkage_method`` (default "average").
+
+    Returns:
+        tuple: (cluster_labels, None, dist_mat). The ``None`` mirrors the cluster-centers slot of
+        :func:`perform_clustering_svd` (hierarchical clustering has no exemplar centers).
+    """
+    if not hasattr(args, "n_basis"):
+        raise AttributeError("args is missing required field: 'n_basis'")
+
+    U_clients = _compute_client_signatures(client_data_list, args.n_basis)
+
+    dist_mat = calculating_adjacency(range(len(U_clients)), U_clients)  # positive, degrees, Eq.2
+    np.fill_diagonal(dist_mat, 0)
+
+    cluster_labels = cluster_hierarchical(
+        dist_mat,
+        beta=getattr(args, "beta", None),
+        n_clusters=getattr(args, "n_clusters", None),
+        linkage_method=getattr(args, "linkage_method", "average"),
+    )
+
+    return cluster_labels, None, dist_mat
 
 
 def find_preference_for_n_clusters(sim_mat, target, random_state=42, n_iter=40):

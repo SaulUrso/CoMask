@@ -25,8 +25,11 @@ train_args:
   client_optimizer: "sgd"
 # cluster params
   n_basis: 5
-  preference: median # -90, -60, 
+  preference: median # -90, -60,
   group_method: clusters
+# PACFL params (only used by pacfl_script.py)
+  beta: 30          # distance-threshold cut, degrees [0,90]; or set n_clusters instead
+  linkage_method: average
 #pruning params
   pruning: "proposal" # "random"
   ssl_coefficient: 0
