@@ -1,3 +1,4 @@
+import os
 import sys
 
 import yaml
@@ -6,14 +7,26 @@ import wandb
 
 
 def initialize_and_override_config():
-    run = wandb.init()
-    assert run is not None
-
+    # Load the (already grid-merged) config first so we can source the wandb
+    # project/entity/run name from it. This matters for offline runs on
+    # network-isolated compute nodes, where there is no sweep agent to define
+    # the run. Under a real sweep agent we leave everything to the agent.
     i = sys.argv.index("--cf")
-
-    # Load base config
     with open(sys.argv[i + 1], "r") as f:
         config = yaml.safe_load(f)
+
+    init_kwargs = {}
+    if "WANDB_SWEEP_ID" not in os.environ:
+        tracking = config.get("tracking_args", {}) or {}
+        if tracking.get("wandb_project"):
+            init_kwargs["project"] = tracking["wandb_project"]
+        if tracking.get("wandb_entity"):
+            init_kwargs["entity"] = tracking["wandb_entity"]
+        if tracking.get("run_name"):
+            init_kwargs["name"] = tracking["run_name"]
+
+    run = wandb.init(**init_kwargs)
+    assert run is not None
 
     # Override with sweep params
     prune_percent = None
