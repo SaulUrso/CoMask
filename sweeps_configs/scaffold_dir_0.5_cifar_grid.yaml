@@ -1,0 +1,53 @@
+program: scripts/my_fedml_script.py
+method: grid
+name: scaffold_dir0.5_cifar
+project: FedCIFAR10
+entity: s-urso2
+metric:
+  name: Server/Test/Acc
+  goal: maximize
+
+parameters:
+  train_args:
+    parameters:
+      learning_rate:
+        values: [0.01, 0.1]
+
+      server_lr:
+        values: [0.25, 0.5, 1.0]
+
+      comm_round:
+        values: [500]
+
+      client_num_in_total:
+        values: [100]
+
+  data_args:
+    parameters:
+      partition_method:
+        values: ["label"]
+
+      method_name:
+        values: ["dirichlet"]
+
+      data_split_alpha:
+        values: [0.5]
+
+      min_require_size:
+        values: [1]
+
+  validation_args:
+    parameters:
+      frequency_of_the_test:
+        values: [250]
+
+command:
+  - uv
+  - run
+  - --no-sync
+  - --env-file
+  - .env
+  - --
+  - ${program}
+  - --cf
+  - configs/scaffold_cifar_config.yaml
