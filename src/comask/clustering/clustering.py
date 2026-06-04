@@ -65,11 +65,97 @@ def perform_clustering_svd(client_data_list, args, output_path="/disc/homes/urso
     sim_mat = -calculating_adjacency(range(args.client_num_in_total), U_clients)
     np.fill_diagonal(sim_mat, 0)  # Set diagonal to 0 for self-similarity
 
-    preference = args.preference if isinstance(args.preference, int) else None
+    n_clusters = getattr(args, "n_clusters", None)
 
-    cluster_labels, cluster_centers = perform_clustering(sim_mat, method="affinity", preference=preference)
+    if isinstance(n_clusters, int) and n_clusters > 0:
+        # Automatically tune AffinityPropagation's `preference` so the clustering
+        # yields exactly `n_clusters` clusters (closest achievable otherwise).
+        cluster_labels, cluster_centers, _ = find_preference_for_n_clusters(sim_mat, n_clusters)
+    else:
+        preference = args.preference if isinstance(args.preference, int) else None
+        cluster_labels, cluster_centers = perform_clustering(sim_mat, method="affinity", preference=preference)
 
     return cluster_labels, cluster_centers, sim_mat
+
+
+def find_preference_for_n_clusters(sim_mat, target, random_state=42, n_iter=40):
+    """
+    Find the AffinityPropagation `preference` value that yields `target` clusters
+    via bisection.
+
+    AffinityPropagation does not let you fix the number of clusters directly, but
+    the cluster count grows (approximately) monotonically with `preference`: more
+    negative preference -> fewer clusters, less negative -> more clusters. We
+    bisect the preference over the range of off-diagonal similarity values until
+    we hit the target count (or get as close as possible).
+
+    Args:
+        sim_mat (np.ndarray): Precomputed similarity matrix (diagonal zeroed).
+        target (int): Desired number of clusters.
+        random_state (int): Seed for AffinityPropagation (deterministic results).
+        n_iter (int): Maximum number of bisection probes.
+
+    Returns:
+        tuple: (cluster_labels, cluster_centers_indices, used_preference) for the
+        clustering whose count is closest to `target`.
+    """
+    # Initial search bounds: range of off-diagonal similarity values. More
+    # negative preference -> fewer clusters; less negative -> more clusters.
+    off_diag = sim_mat[~np.eye(sim_mat.shape[0], dtype=bool)]
+    low, high = float(off_diag.min()), float(off_diag.max())
+    span = high - low if high > low else abs(high) + 1.0
+
+    def cluster_at(pref):
+        labels, centers = perform_clustering(sim_mat, method="affinity", preference=pref)
+        return labels, centers, len(set(labels))
+
+    best = None  # (abs_diff, count, preference, labels, centers)
+
+    def consider(pref, labels, centers, count):
+        nonlocal best
+        diff = abs(count - target)
+        if best is None or diff < best[0]:
+            best = (diff, count, pref, labels, centers)
+
+    # Expand the bounds outward until they bracket the target count. The
+    # conventional [min, max] similarity range does not always reach very small
+    # (or very large) cluster counts, so push `low` further negative while it
+    # still yields too many clusters, and `high` higher while it yields too few.
+    for _ in range(20):
+        labels, centers, count = cluster_at(low)
+        consider(low, labels, centers, count)
+        if count <= target:
+            break
+        low -= span
+    for _ in range(20):
+        labels, centers, count = cluster_at(high)
+        consider(high, labels, centers, count)
+        if count >= target:
+            break
+        high += span
+
+    for _ in range(n_iter):
+        mid = (low + high) / 2.0
+        labels, centers, count = cluster_at(mid)
+        consider(mid, labels, centers, count)
+
+        if count == target:
+            print(f"  - Found preference={mid:.4f} yielding exactly {target} clusters")
+            return labels, centers, mid
+
+        if count < target:
+            # Too few clusters -> need a less negative (higher) preference.
+            low = mid
+        else:
+            # Too many clusters -> need a more negative (lower) preference.
+            high = mid
+
+    _, count, pref, labels, centers = best
+    print(
+        f"  - WARNING: could not reach exactly {target} clusters; "
+        f"using closest preference={pref:.4f} yielding {count} clusters"
+    )
+    return labels, centers, pref
 
 
 def flatten(items):
