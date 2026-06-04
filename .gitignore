@@ -44,3 +44,5 @@ plots/*
 
 #main 
 main*.py
+
+hf_cache
