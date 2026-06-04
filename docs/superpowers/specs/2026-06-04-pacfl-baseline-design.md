@@ -138,7 +138,10 @@ if getattr(args, "enable_wandb", False):
 ## Component 4 — Sweep configs (`sweeps_configs/`)
 
 Four `method: grid`, `program: scripts/pacfl_script.py` files modeled on `comask_*_grid.yaml`.
-Primary swept axis = `beta`. Resulting cluster count logged via `Clustering/NumClusters`.
+Swept axis = fixed `n_clusters: [2, 4, 8]` (HC cut with `criterion="maxclust"`), matching the
+CoMask grids for head-to-head comparison. (The `beta`-threshold path remains supported in the code
+and base configs for faithful-PACFL runs, but the initial sweeps fix the cluster count.) Resulting
+cluster count logged via `Clustering/NumClusters`.
 
 | File | Base config (`--cf`) | Dataset / partition | per-round | comm_round (initial) |
 |---|---|---|---|---|

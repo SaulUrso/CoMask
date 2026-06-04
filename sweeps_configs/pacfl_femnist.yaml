@@ -16,10 +16,10 @@ parameters:
       linkage_method:
         values: ["average"]
 
-      # --- primary PACFL axis: distance-threshold cut (degrees, min principal angle in [0,90]) ---
-      # Initial guesses; calibrate from Clustering/NumClusters after the first run.
-      beta:
-        values: [10, 20, 30, 40, 50, 60]
+      # --- swept axis: fixed cluster count (matches the CoMask grids for head-to-head comparison) ---
+      # HC cuts the dendrogram to exactly this many clusters (criterion="maxclust").
+      n_clusters:
+        values: [2, 4, 8]
 
       n_basis:
         values: [5]
