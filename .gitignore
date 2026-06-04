@@ -46,3 +46,5 @@ plots/*
 main*.py
 
 hf_cache
+*.md
+.claude
