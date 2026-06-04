@@ -44,8 +44,14 @@ if __name__ == "__main__":
     method_name = getattr(args, "method_name", "dirichlet")
     feature_col = getattr(args, "feature_col", None)
 
+    seed = getattr(args, "seed", 0)
+    partition_kwargs = {"seed": seed}
+    if method_name == "dirichlet":
+        partition_kwargs["data_split_alpha"] = getattr(args, "data_split_alpha", 0.5)
+        partition_kwargs["min_require_size"] = getattr(args, "min_require_size", 10)
+
     train_partitions = partition(
-        train_dataset, args.partition_method, method_name=method_name, client_num=num_clients, feature_col=feature_col
+        train_dataset, args.partition_method, method_name=method_name, client_num=num_clients, feature_col=feature_col, **partition_kwargs
     )
 
     if args.partition_method == "natural" and feature_col is not None:
@@ -57,6 +63,7 @@ if __name__ == "__main__":
             method_name=method_name,
             client_num=num_clients,
             feature_col=feature_col,
+            **partition_kwargs,
         )
 
     args.client_num_in_total = len(train_partitions)
