@@ -42,7 +42,7 @@ parameters:
   validation_args:
     parameters:
       frequency_of_the_test:
-        values: [50]
+        values: [100]
 
 
 command:
