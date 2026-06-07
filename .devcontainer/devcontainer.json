@@ -1,0 +1,20 @@
+{
+  "name": "CoMask (L4T PyTorch)",
+  "image": "dustynv/l4t-pytorch:r36.4.0",
+  "postCreateCommand": "/bin/bash .devcontainer/post-create.sh",
+  "containerEnv": {
+    "UV_PYTHON": "/usr/bin/python3"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-toolsai.jupyter"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3"
+      }
+    }
+  }
+}
