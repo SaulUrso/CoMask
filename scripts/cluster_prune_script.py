@@ -50,7 +50,7 @@ if __name__ == "__main__":
         partition_kwargs = {
             "data_split_alpha": getattr(args, "data_split_alpha", 0.5),
             "seed": seed,
-            "min_require_size": getattr(args, "min_require_size", 10),
+            "min_require_size": getattr(args, "min_require_size", 1),
             "self_balancing": getattr(args, "self_balancing", True),
         }
     elif method_name == "class":

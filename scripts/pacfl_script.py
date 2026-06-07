@@ -17,7 +17,7 @@ import wandb
 from comask.clustering.clustering import perform_clustering_svd_hc
 from comask.data.adapters import FedMLAdapter
 from comask.data.dataload import collate_fn, load_my_data
-from comask.data.partition import create_natural_test_sets, partition
+from comask.data.partition import create_natural_test_sets, partition, partition_dirichlet_aligned
 from comask.models.cnn import HARBox_CNN
 from comask.models.mobilenet import MobileNet
 from comask.servers.pacfl_trainer import PACFLClusterAPI
@@ -42,20 +42,63 @@ if __name__ == "__main__":
     method_name = getattr(args, "method_name", "dirichlet")
     feature_col = getattr(args, "feature_col", None)
 
-    train_partitions = partition(
-        train_dataset, args.partition_method, method_name=method_name, client_num=num_clients, feature_col=feature_col
-    )
-
-    if args.partition_method == "natural" and feature_col is not None:
-        test_partitions = create_natural_test_sets(train_partitions, test_dataset, feature_column=feature_col)
+    # Build kwargs for label-based partitioning with method-specific parameters.
+    # Without this, data_split_alpha / min_require_size / seed never reach the partitioner
+    # and the Dirichlet draw silently falls back to its defaults (alpha=0.5, min_require_size=10).
+    seed = getattr(args, "seed", 0)
+    if method_name == "dirichlet":
+        partition_kwargs = {
+            "data_split_alpha": getattr(args, "data_split_alpha", 0.5),
+            "seed": seed,
+            "min_require_size": getattr(args, "min_require_size", 1),
+            "self_balancing": getattr(args, "self_balancing", True),
+        }
+    elif method_name == "class":
+        partition_kwargs = {
+            "classes": getattr(args, "classes", 2),
+            "seed": seed,
+        }
+    elif method_name == "shard":
+        partition_kwargs = {
+            "shards_per_client": getattr(args, "shards_per_client", 2),
+            "seed": seed,
+        }
     else:
-        test_partitions = partition(
+        partition_kwargs = {
+            "seed": seed,
+        }
+
+    if args.partition_method == "label" and method_name == "dirichlet":
+        # Dirichlet train/test partitions share per-class proportions so each client's
+        # train and test splits follow the same class distribution (matches cluster_prune_script).
+        train_partitions, test_partitions = partition_dirichlet_aligned(
+            train_dataset,
             test_dataset,
+            num_clients,
+            label_column="label",
+            **partition_kwargs,
+        )
+    else:
+        train_partitions = partition(
+            train_dataset,
             args.partition_method,
             method_name=method_name,
             client_num=num_clients,
             feature_col=feature_col,
+            **partition_kwargs,
         )
+
+        if args.partition_method == "natural" and feature_col is not None:
+            test_partitions = create_natural_test_sets(train_partitions, test_dataset, feature_column=feature_col)
+        else:
+            test_partitions = partition(
+                test_dataset,
+                args.partition_method,
+                method_name=method_name,
+                client_num=num_clients,
+                feature_col=feature_col,
+                **partition_kwargs,
+            )
 
     args.client_num_in_total = len(train_partitions)
 
