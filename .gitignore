@@ -48,5 +48,5 @@ main*.py
 hf_cache
 *.md
 .claude
-.CLAUDE
+CLAUDE
 uv.lock
