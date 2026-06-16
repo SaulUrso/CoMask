@@ -21,11 +21,11 @@ parameters:
 
       # --- grid axis (CoMask-specific knob) ---
       ssl_coefficient:
-        values: [0, 0.0001, 0.001, 0.01, 0.1]
+        values: [0.1]
 
       # --- fixed across all experiments ---
       accuracy_threshold:
-        values: [0.2]
+        values: [0.3]
 
       learning_rate:
         values: [0.1]
@@ -34,19 +34,19 @@ parameters:
         values: [0.0001]
 
       comm_round:
-        values: [250]
+        values: [500]
 
       consensus_percentage:
-        values: [0.2]
+        values: [0.5,0.7,0.1,0.3]
 
       prune_counter:
         values: [3]
 
       prune_percent:
-        values: [0.1]
+        values: [0.05,0.1,0.15,0.20,0.25]
 
       consolidation_percentage:
-        values: [0.1]
+        values: [0.05,0.1,0.15,0.20,0.25]
 
       client_num_in_total:
         values: [100]
@@ -54,7 +54,7 @@ parameters:
   validation_args:
     parameters:
       frequency_of_the_test:
-        values: [125]
+        values: [200]
 
   data_args:
     parameters:
