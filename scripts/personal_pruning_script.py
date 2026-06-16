@@ -2,6 +2,8 @@
 FedML training script adapted to use the custom data partitioning
 """
 
+import math
+
 import fedml
 from fedml import FedMLRunner
 from comask.models.resnet_cifar import resnet18_cifar
@@ -100,7 +102,20 @@ if __name__ == "__main__":
             )
 
     args.client_num_in_total = len(train_partitions)
-    
+
+    # Support fractional participation ratio: e.g. 0.1 -> 10% of total clients per round.
+    # PruningTrainerAPI does range(client_num_per_round), so this must be an int.
+    client_num_per_round = getattr(args, "client_num_per_round", None)
+    if isinstance(client_num_per_round, (int, float)) and 0 < client_num_per_round < 1:
+        args.client_num_per_round = max(1, math.ceil(args.client_num_in_total * client_num_per_round))
+        print(
+            "  - client_num_per_round interpreted as fraction: "
+            f"{client_num_per_round} -> {args.client_num_per_round} clients/round"
+        )
+    elif isinstance(client_num_per_round, float):
+        # FedML expects an integer count when this value is >= 1.
+        args.client_num_per_round = int(client_num_per_round)
+
     validation_split = getattr(args, "validation_split", None)
 
     dataset = FedMLAdapter.create_fedml_data_structure(
