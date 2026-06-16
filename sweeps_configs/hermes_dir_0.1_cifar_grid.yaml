@@ -1,0 +1,77 @@
+program: scripts/personal_pruning_script.py
+method: grid
+name: hermes_dir0.1_cifar
+project: FedCIFAR10
+entity: s-urso2
+metric:
+  name: Global/Test/Acc
+  goal: maximize
+
+# Hermes (personalized structured pruning, PruningTrainerAPI) baseline on
+# CIFAR-10, Dirichlet alpha=0.1. Hyperparameters are matched to the CoMask
+# CIFAR-dir0.1 grid (learning_rate=0.1, weight_decay=1e-4, comm_round=500,
+# accuracy_threshold=0.25, 100 clients, test every 200 rounds) so the two are
+# directly comparable. The only swept axis is prune_percent — the same axis
+# CoMask sweeps — over the identical 5 values. minimum_channels is the Hermes-
+# specific floor and is held fixed at 8.
+parameters:
+  train_args:
+    parameters:
+      # --- grid axis (Hermes pruning knob; same values CoMask sweeps) ---
+      prune_percent:
+        values: [0.05, 0.1, 0.15, 0.2, 0.25]
+
+      # --- Hermes-specific, fixed ---
+      minimum_channels:
+        values: [8]
+
+      # Structured Sparsity Learning (group-lasso) regularizer — core to Hermes'
+      # pruning. Matched to the CoMask CIFAR-dir0.1 value.
+      ssl_coefficient:
+        values: [0.1]
+
+      # --- matched to CoMask CIFAR dir0.1, fixed ---
+      learning_rate:
+        values: [0.1]
+
+      weight_decay:
+        values: [0.0001]
+
+      comm_round:
+        values: [500]
+
+      accuracy_threshold:
+        values: [0.25]
+
+      client_num_in_total:
+        values: [100]
+
+  data_args:
+    parameters:
+      partition_method:
+        values: ["label"]
+
+      method_name:
+        values: ["dirichlet"]
+
+      data_split_alpha:
+        values: [0.1]
+
+      min_require_size:
+        values: [1]
+
+  validation_args:
+    parameters:
+      frequency_of_the_test:
+        values: [200]
+
+command:
+  - uv
+  - run
+  - --no-sync
+  - --env-file
+  - .env
+  - --
+  - ${program}
+  - --cf
+  - configs/cifar_config.yaml
