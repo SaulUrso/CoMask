@@ -50,3 +50,6 @@ hf_cache
 .claude
 CLAUDE.md
 uv.lock
+
+configs/generated
+out
