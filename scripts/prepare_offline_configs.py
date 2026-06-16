@@ -52,6 +52,33 @@ def expand_grid(sweep_params):
     return combinations, leaves
 
 
+def _value_by_key(combo, name):
+    """Return the chosen value for the first (section, key) whose key == name."""
+    for (section, key), value in combo.items():
+        if key == name:
+            return value
+    return None
+
+
+def drop_invalid_combos(combinations):
+    """Keep only combos that satisfy CoMask's prune_percent == consolidation_percentage.
+
+    A grid sweep treats these as two independent axes, so the Cartesian product
+    includes the off-diagonal pairs. Under a live sweep agent the training
+    script skips those via initialize_and_override_config (it reads the values
+    from wandb.config and exit(0)s on a mismatch). Offline there is no agent and
+    wandb.config is empty, so that guard never fires — we must drop them here.
+    """
+    kept = []
+    for combo in combinations:
+        prune = _value_by_key(combo, "prune_percent")
+        consolidation = _value_by_key(combo, "consolidation_percentage")
+        if prune is not None and consolidation is not None and prune != consolidation:
+            continue
+        kept.append(combo)
+    return kept
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sweep", required=True, help="sweep YAML to expand")
@@ -70,6 +97,10 @@ def main():
     entity = sweep.get("entity")
 
     combinations, leaves = expand_grid(sweep.get("parameters", {}))
+    n_full = len(combinations)
+    combinations = drop_invalid_combos(combinations)
+    if len(combinations) != n_full:
+        print(f"# kept {len(combinations)}/{n_full} combos (dropped prune_percent != consolidation_percentage)")
     varying = {(s, k) for s, k, vals in leaves if len(vals) > 1}
 
     out_root = os.path.join(args.out_dir, sweep_name)
